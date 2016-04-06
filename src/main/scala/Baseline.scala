@@ -19,6 +19,10 @@ import org.apache.spark.graphx._
 
 import scala.collection.mutable.ArrayBuffer
 
+/**
+ * Пара пользователей со счетчиком общих друзей и другими счетчиками,
+ * которые вычисляются одновременно с ним
+ */
 case class PairWithScore(
         person1: Int,
         person2: Int,
@@ -39,47 +43,6 @@ case class UserFriends(user: Int, friends: Array[Int])
 
 case class AgeSexCity(age: Int, sex: Int, city: Int)
 
-case class RelationCount(count: Array[Int]) {
-    override def toString: String = {
-        val sb = StringBuilder.newBuilder
-        sb.append("(")
-        for (i <- 0 until count.length) {
-            if (i > 0) {
-                sb.append(", ")
-            }
-            sb.append(getRelationName(i)).append(": ").append(count(i))
-        }
-        sb.append(")")
-        sb.toString()
-    }
-
-    def getRelationName(i: Int): String = {
-        i match {
-            case 1 => "Love"
-            case 2 => "Spouse"
-            case 3 => "Parent"
-            case 4 => "Child"
-            case 5 => "Brother/Sister"
-            case 6 => "Uncle/Aunt"
-            case 7 => "Relative"
-            case 8 => "Close friend"
-            case 9 => "Colleague"
-            case 10 => "Schoolmate"
-            case 11 => "Nephew"
-            case 12 => "Grandparent"
-            case 13 => "Grandchild"
-            case 14 => "College/University fellow"
-            case 15 => "Army fellow"
-            case 16 => "Parent in law"
-            case 17 => "Child in law"
-            case 18 => "Godparent"
-            case 19 => "Godchild"
-            case 20 => "Playing together"
-            case other => "Unknown(" + other + ")"
-        }
-    }
-}
-
 case class UserPageRank(user: Long, rank: Double)
 
 case class FriendMask(uid: Int, mask: Int)
@@ -87,6 +50,8 @@ case class FriendMask(uid: Int, mask: Int)
 case class UserFriendsMask(user: Int, friends: Array[FriendMask])
 
 case class FriendStat(intCount: Int, extCount: Int)
+
+case class Interaction(from: Long, to: Long, entries: Seq[(Int, Double)])
 
 object Baseline {
 
@@ -119,8 +84,8 @@ object Baseline {
         val MASK_ARMY = 1 << REL_ARMY
 
         var stage = 0
-        var fromPart = 5
-        var toPart = 6
+        var fromPart = 33
+        var toPart = 42
 
         def parseArgs(): Unit = {
             for (i <- 1 until args.length) {
@@ -168,13 +133,13 @@ object Baseline {
         val cityPairCountTxtPath = cityPairCountPath + "_txt"
         val cityPopulationPath = dataDir + "cityPopulation"
         val cityPopulationTxtPath = cityPopulationPath + "_txt"
-        val neighborsCountPath = dataDir + "neighborsCount"
         val userPageRankPath = dataDir + "userPageRank"
         val userPageRankTxtPath = userPageRankPath + "_txt"
         val otherDetailsPath = dataDir + "otherDetails"
+        val interactionsPath = dataDir + "interactions"
 
         val numPartitions = 200
-        val numPartitionsGraph = 11
+        val numPartitionsGraph = 107
         //        val numPartitions = 1
         //        val numPartitionsGraph = 1
 
@@ -216,6 +181,11 @@ object Baseline {
                 })
         }
 
+        var interactions = {
+            sqlc.read.parquet(interactionsPath)
+                .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => Interaction(from, to, entries) }
+        }
+
         def getReversedMaskGraph(minEdges: Int, maxEdges: Int, minReversedEdges: Int, maxReversedEdges: Int) = {
             graphMask
                 .filter(userFriends =>
@@ -232,7 +202,7 @@ object Baseline {
 
 
         if (stage <= STAGE_REVERSE && !fs.exists(new Path(reversedGraphPath))) {
-            val reversedGraph = getReversedMaskGraph(1, 10000, 2, 10000)
+            val reversedGraph = getReversedMaskGraph(1, 2000, 2, 1000)
 
             reversedGraph
                 .toDF
@@ -275,18 +245,13 @@ object Baseline {
             computePageRank(mainUsersBC)
         }
 
-        def userPartNumber(uid: Int): Int = {
-            uid % 11
-        }
-
         def useForTraining(uid: Int): Boolean = {
-            val part = userPartNumber(uid)
-            part == 5 || part == 6
+            val part = uid % numPartitionsGraph
+            part >= fromPart || part <= toPart
         }
 
         def useForPrediction(uid: Int): Boolean = {
-            val part = userPartNumber(uid)
-            part == 7
+            uid % 11 == 7
         }
 
         def useUser(uid: Int): Boolean = {
@@ -295,11 +260,14 @@ object Baseline {
 
         if (stage <= STAGE_PAIRS && !fs.exists(new Path(commonFriendsPath))) {
 
-            val pageRank = sqlc.read.parquet(userPageRankPath)
-                .map(t => t.getAs[Long](0) -> t.getAs[Double](1))
-            val maxPageRank = pageRank.map(t => t._2).max()
-            val normalizedPageRank = pageRank.map(t => t._1 -> t._2 / maxPageRank)
-            val normalizedPageRankBC = sc.broadcast(normalizedPageRank.collectAsMap())
+//            val pageRanks = {
+//                sqlc.read.parquet(userPageRankPath)
+//                    .map{case Row(k: Long, v: Double) => k.toInt -> v}
+//
+//            }
+//            val maxPageRank = pageRank.map(t => t._2).max()
+//            val normalizedPageRank = pageRank.map(t => t._1 -> t._2 / maxPageRank)
+//            val normalizedPageRankBC = sc.broadcast(normalizedPageRank.collectAsMap())
 
             otherDetails.printSchema()
 
@@ -317,11 +285,42 @@ object Baseline {
                 .map(t => (t._1.toInt, t._8))
 
             val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
-
             val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
-
             val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
+/*
+            val interactions = {
+                sqlc.read.parquet(interactionsPath)
+                    .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => (from, to) -> entries }
+            }
+            val interactionsBC = sc.broadcast(interactions.collectAsMap())
+
+            def getInteractionScore(interactionEntries: Seq[(Int, Double)]): Unit = {
+                 for (interaction <- interactionEntries) {
+                     val iType = interaction._1
+                     val importance =
+                         if (iType == 1) 1.0 // удаление фида из ленты
+                         else if (iType == 2) 1.0 // поход в гости
+                         else if (iType == 3) 1.0 // участие в опросе
+                         else if (iType == 4) 1.0 // отправка личного сообщения
+                         else if (iType == 5) 1.0 // удаление личного сообщения
+                         else if (iType == 6) 1.0 // класс объекта
+                         else if (iType == 7) 1.0 // разкласс объекта
+                         else if (iType == 8) 1.0 // комментирование пользовательского поста
+                         else if (iType == 9) 1.0 // комментирования пользовательского фото
+                         else if (iType == 10) 1.0 // комментирование пользовательского видео
+                         else if (iType == 11) 1.0 // комментирование фотоальбома
+                         else if (iType == 12) 1.0 // класс к комментарию
+                         else if (iType == 13) 1.0 // отправка сообщения на форуме
+                         else if (iType == 14) 1.0 // оценка фото
+                         else if (iType == 15) 1.0 // просмотр фото
+                         else if (iType == 16) 1.0 // отметка пользователя на фотографиях
+                         else if (iType == 17) 1.0 // отметка пользователя на отдельном фото
+                         else if (iType == 18) 1.0 // отправка подарка
+                         else 0.0
+                 }
+            }
+*/
             def genAdamAdarScore(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
                 // person1, person2 -> common friends, adam adair score, common school, common work
                 val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Double, Double, Double, Int, Int, Int, Int, Int, Int))]
@@ -330,44 +329,48 @@ object Baseline {
                 val nCount = neighborsCountBC.value.getOrElse(uf.user, 0)
                 val aaScore = if (nCount >= 2) 1.0 / Math.log(nCount.toDouble) else 0.0
                 val fedorScore = 100.0 / Math.pow(nCount.toDouble + 10, 1.0/3.0) - 6
-                val pageRankScore = normalizedPageRankBC.value.getOrElse(uf.user, 0.0)
+                val pageRankScore = 1.0 //normalizedPageRankBC.value.getOrElse(uf.user, 0.0)
 
                 for (i <- 0 until uf.friends.length) {
                     val p1 = uf.friends(i).uid
 
-                    val mask1 = uf.friends(i).mask
-                    val school1 = if ((mask1 & MASK_SCHOOL) != 0) 1 else 0
-                    val work1 = if ((mask1 & MASK_WORK) != 0) 1 else 0
-                    val univ1 = if ((mask1 & MASK_UNIVERSITY) != 0) 1 else 0
-                    val army1 = if ((mask1 & MASK_ARMY) != 0) 1 else 0
-                    val interaction1 = 1.0
+                    if (p1 % numPartitions == k) {
 
-                    for (j <- i + 1 until uf.friends.length) {
-                        val p2 = uf.friends(j).uid
+                        val mask1 = uf.friends(i).mask
+                        val school1 = if ((mask1 & MASK_SCHOOL) != 0) 1 else 0
+                        val work1 = if ((mask1 & MASK_WORK) != 0) 1 else 0
+                        val univ1 = if ((mask1 & MASK_UNIVERSITY) != 0) 1 else 0
+                        val army1 = if ((mask1 & MASK_ARMY) != 0) 1 else 0
+                        val interaction1 = 1.0
 
-                        if (p2 % numPartitions == k && (useUser(p1) || useUser(p2))) {
 
-                            val mask2 = uf.friends(j).mask
-                            val school2 = if ((mask2 & MASK_SCHOOL) != 0) 1 else 0
-                            val work2 = if ((mask2 & MASK_WORK) != 0) 1 else 0
-                            val univ2 = if ((mask2 & MASK_UNIVERSITY) != 0) 1 else 0
-                            val army2 = if ((mask2 & MASK_ARMY) != 0) 1 else 0
-                            val interaction2 = 1.0
+                        for (j <- i + 1 until uf.friends.length) {
+                            val p2 = uf.friends(j).uid
 
-                            val interactionScore = interaction1 * interaction2
+                            if (useUser(p1) || useUser(p2)) {
 
-                            pairs.append(((p1, p2), (
-                                1,
-                                aaScore,
-                                fedorScore,
-                                interactionScore,
-                                pageRankScore,
-                                school1 * school2,
-                                work1 * work2,
-                                army1 * army2,
-                                univ1 * univ2,
-                                mask1 | mask2,
-                                mask1 & mask2)))
+                                val mask2 = uf.friends(j).mask
+                                val school2 = if ((mask2 & MASK_SCHOOL) != 0) 1 else 0
+                                val work2 = if ((mask2 & MASK_WORK) != 0) 1 else 0
+                                val univ2 = if ((mask2 & MASK_UNIVERSITY) != 0) 1 else 0
+                                val army2 = if ((mask2 & MASK_ARMY) != 0) 1 else 0
+                                val interaction2 = 1.0
+
+                                val interactionScore = interaction1 * interaction2
+
+                                pairs.append(((p1, p2), (
+                                    1,
+                                    aaScore,
+                                    fedorScore,
+                                    interactionScore,
+                                    pageRankScore,
+                                    school1 * school2,
+                                    work1 * work2,
+                                    army1 * army2,
+                                    univ1 * univ2,
+                                    mask1 | mask2,
+                                    mask1 & mask2)))
+                            }
                         }
                     }
                 }
@@ -392,6 +395,7 @@ object Baseline {
                             val1._10 | val2._10,
                             val1._11 | val2._11))
                         .map(t => PairWithScore(t._1._1, t._1._2, t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11))
+                        .filter(pair => pair.aaScore > 1.0)
                 }
 
                 commonFriendPairs.repartition(16).toDF.write.parquet(commonFriendsPath + "/part_" + k)
