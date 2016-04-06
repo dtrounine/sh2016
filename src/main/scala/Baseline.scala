@@ -181,7 +181,7 @@ object Baseline {
                 })
         }
 
-        var interactions = {
+        val interactions = {
             sqlc.read.parquet(interactionsPath)
                 .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => Interaction(from, to, entries) }
         }
@@ -523,7 +523,29 @@ object Baseline {
                 })
         }
 
+        val mainUsersFriendsBC = {
+            val m = graph.map(userFriends => userFriends.user -> userFriends.friends.length)
+            sc.broadcast(m.collectAsMap())
+        }
         val ageSexCityBC = sc.broadcast(ageSexCity.collectAsMap())
+
+        def getJaccardSimilarity(commonFriends: Int, friendsCount1:Int, friendsCount2:Int) : Double = {
+            val union = friendsCount1 + friendsCount2 - commonFriends
+
+            if (union == 0) {
+                0.0
+            } else {
+                commonFriends.toDouble / union.toDouble
+            }
+        }
+
+        def getCosineSimilarity(commonFriends: Int, friendsCount1:Int, friendsCount2:Int) : Double = {
+            if (friendsCount1 == 0 && friendsCount2 == 0) {
+                0.0
+            } else {
+                commonFriends.toDouble / math.sqrt(friendsCount1 * friendsCount2)
+            }
+        }
 
         // step 5
         def prepareData(
@@ -550,14 +572,22 @@ object Baseline {
                         0.0
                     }
                 }
+
+
                 val diffAge = abs(ageSexCity1.age - ageSexCity2.age).toDouble
                 val meanAge = 25000.0 - (ageSexCity1.age + ageSexCity2.age) * 0.5
+                val friendsCount1 = mainUsersFriendsBC.value.getOrElse(pair.person1, 0)
+                val friendsCount2 = mainUsersFriendsBC.value.getOrElse(pair.person2, 0)
+                val jaccard = getJaccardSimilarity(pair.commonFriendsCount, friendsCount1, friendsCount2)
+                val cosine = getCosineSimilarity(pair.commonFriendsCount, friendsCount1, friendsCount2)
 
                 Vectors.dense(
                     Math.log(1.0 + pair.aaScore),
                     Math.log(1.0 + pair.fedorScore),
                     Math.log(diffAge + 1.0),
                     Math.log(meanAge),
+                    jaccard,
+                    cosine,
                     if (isSameSex) 1.0 else 0.0,
                     cityFactor,
                     pair.commonSchool,
