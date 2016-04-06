@@ -31,10 +31,12 @@ case class PairWithScore(
         fedorScore: Double,
         interactionScore: Double,
         pageRankScore: Double,
-        commonSchool: Int,
-        commonWork: Int,
-        commonArmy: Int,
-        commonUniversity: Int,
+        isStrongRelation: Int,
+        isWeakRelation: Int,
+        isColleague: Int,
+        isSchoolmate: Int,
+        isArmyFellow: Int,
+        isOther: Int,
         maskOr: Int,
         maskAnd: Int
 )
@@ -73,15 +75,6 @@ object Baseline {
         val STAGE_COUNT_CITIES = 4
         val STAGE_PREPARE = 5
         val STAGE_TRAIN = 6
-
-        val REL_SCHOOL = 10
-        val REL_WORK = 9
-        val REL_UNIVERSITY = 14
-        val REL_ARMY = 15
-        val MASK_SCHOOL = 1 << REL_SCHOOL
-        val MASK_WORK = 1 << REL_WORK
-        val MASK_UNIVERSITY = 1 << REL_UNIVERSITY
-        val MASK_ARMY = 1 << REL_ARMY
 
         var stage = 0
         var fromPart = 33
@@ -325,7 +318,7 @@ object Baseline {
 
             def genPairScores(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
                 // person1, person2 -> common friends, adam adair score, common school, common work
-                val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Double, Double, Double, Int, Int, Int, Int, Int, Int))]
+                val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Double, Double, Double, Int, Int, Int, Int, Int, Int, Int, Int))]
 
                 // get Adam-Adair score for the common friend
                 val nCount = neighborsCountBC.value.getOrElse(uf.user, 0)
@@ -339,10 +332,12 @@ object Baseline {
                     if (p1 % numPartitions == k) {
 
                         val mask1 = uf.friends(i).mask
-                        val school1 = if ((mask1 & MASK_SCHOOL) != 0) 1 else 0
-                        val work1 = if ((mask1 & MASK_WORK) != 0) 1 else 0
-                        val univ1 = if ((mask1 & MASK_UNIVERSITY) != 0) 1 else 0
-                        val army1 = if ((mask1 & MASK_ARMY) != 0) 1 else 0
+                        val isStrongRelation1 = MaskHelper.isStrongRelation(mask1)
+                        val isWeakRelation1 = MaskHelper.isWeakRelation(mask1)
+                        val isColleague1 = MaskHelper.isColleague(mask1)
+                        val isSchoolmate1 = MaskHelper.isSchoolmate(mask1)
+                        val isArmyFellow1 = MaskHelper.isArmyFellow(mask1)
+                        val isOther1 = MaskHelper.isOther(mask1)
                         val interactionEntries1 = interactionsBC.value.getOrElse((p1, uf.user), null)
                         val interaction1 = if (interactionEntries1 != null) getInteractionScore(interactionEntries1) else 0.0
 
@@ -352,10 +347,12 @@ object Baseline {
                             if (useUser(p1) || useUser(p2)) {
 
                                 val mask2 = uf.friends(j).mask
-                                val school2 = if ((mask2 & MASK_SCHOOL) != 0) 1 else 0
-                                val work2 = if ((mask2 & MASK_WORK) != 0) 1 else 0
-                                val univ2 = if ((mask2 & MASK_UNIVERSITY) != 0) 1 else 0
-                                val army2 = if ((mask2 & MASK_ARMY) != 0) 1 else 0
+                                val isStrongRelation2 = MaskHelper.isStrongRelation(mask2)
+                                val isWeakRelation2 = MaskHelper.isWeakRelation(mask2)
+                                val isColleague2 = MaskHelper.isColleague(mask2)
+                                val isSchoolmate2 = MaskHelper.isSchoolmate(mask2)
+                                val isArmyFellow2 = MaskHelper.isArmyFellow(mask2)
+                                val isOther2 = MaskHelper.isOther(mask2)
                                 val interactionEntries2 = interactionsBC.value.getOrElse((p2, uf.user), null)
                                 val interaction2 = if (interactionEntries2 != null) getInteractionScore(interactionEntries2) else 0.0
 
@@ -367,10 +364,12 @@ object Baseline {
                                     fedorScore,
                                     interactionScore,
                                     pageRankScore,
-                                    school1 * school2,
-                                    work1 * work2,
-                                    army1 * army2,
-                                    univ1 * univ2,
+                                    isStrongRelation1 * isStrongRelation2,
+                                    isWeakRelation1 * isWeakRelation2,
+                                    isColleague1 * isColleague2,
+                                    isSchoolmate1 * isSchoolmate2,
+                                    isArmyFellow1 * isArmyFellow2,
+                                    isOther1 * isOther2,
                                     mask1 | mask2,
                                     mask1 & mask2)))
                             }
@@ -396,10 +395,12 @@ object Baseline {
                                 val1._7 + val2._7,
                                 val1._8 + val2._8,
                                 val1._9 + val2._9,
-                                val1._10 | val2._10,
-                                val1._11 | val2._11))
+                                val1._10 + val2._10,
+                                val1._11 + val2._11,
+                                val1._12 | val2._12,
+                                val1._13 | val2._13))
                             .map(t => PairWithScore(t._1._1, t._1._2, // uid1, uid2
-                                t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11))
+                                t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11, t._2._12, t._2._13))
                             .filter(pair => pair.aaScore > 1.0)
                     }
 
@@ -417,10 +418,12 @@ object Baseline {
                                 pair.fedorScore,
                                 pair.interactionScore,
                                 pair.pageRankScore,
-                                pair.commonSchool,
-                                pair.commonWork,
-                                pair.commonArmy,
-                                pair.commonUniversity,
+                                pair.isStrongRelation,
+                                pair.isWeakRelation,
+                                pair.isColleague,
+                                pair.isSchoolmate,
+                                pair.isArmyFellow,
+                                pair.isOther,
                                 pair.maskOr,
                                 pair.maskAnd
                                 )
@@ -483,8 +486,8 @@ object Baseline {
                     t.getAs[Double](4), // fedorScore
                     t.getAs[Double](5), // interactionScore
                     t.getAs[Double](6), // pageRankScore
-                    t.getAs[Int](7), t.getAs[Int](8), t.getAs[Int](9), t.getAs[Int](10),
-                    t.getAs[Int](11), t.getAs[Int](12)))
+                    t.getAs[Int](7), t.getAs[Int](8), t.getAs[Int](9), t.getAs[Int](10), t.getAs[Int](11), t.getAs[Int](12),
+                    t.getAs[Int](13), t.getAs[Int](14)))
         }
 
 //        var adamAdairPairs = sc.parallelize(Seq[PairWithScore]())
@@ -594,10 +597,12 @@ object Baseline {
                     Math.log(1.0 + pair.interactionScore),
                     if (isSameSex) 1.0 else 0.0,
                     cityFactor,
-                    pair.commonSchool,
-                    pair.commonWork,
-                    pair.commonArmy,
-                    pair.commonUniversity,
+                    pair.isStrongRelation,
+                    pair.isWeakRelation,
+                    pair.isColleague,
+                    pair.isSchoolmate,
+                    pair.isArmyFellow,
+                    pair.isOther,
                     if (pair.maskAnd > 1) 1.0 else 0.0
                 )
             })
