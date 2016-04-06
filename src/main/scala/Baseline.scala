@@ -260,36 +260,32 @@ object Baseline {
 
         if (stage <= STAGE_PAIRS && !fs.exists(new Path(commonFriendsPath))) {
 
-//            val pageRanks = {
-//                sqlc.read.parquet(userPageRankPath)
-//                    .map{case Row(k: Long, v: Double) => k.toInt -> v}
-//
-//            }
-//            val maxPageRank = pageRank.map(t => t._2).max()
-//            val normalizedPageRank = pageRank.map(t => t._1 -> t._2 / maxPageRank)
-//            val normalizedPageRankBC = sc.broadcast(normalizedPageRank.collectAsMap())
+            val pageRank = {
+                sqlc.read.parquet(userPageRankPath)
+                    .map{case Row(k: Long, v: Double) => k.toInt -> v}
 
-//            otherDetails.printSchema()
-//
-//            val otherNeighborsCount = otherDetails.map(t => (
-//                t.getAs[Long](0), // UID
-//                t.getAs[Long](1), // CreateDate
-//                t.getAs[Int](2), // BirthDate
-//                t.getAs[Int](3), // gender
-//                t.getAs[Long](4), // country ID
-//                t.getAs[Int](5), // location ID
-//                t.getAs[Int](6), // login region
-//                t.getAs[Int](7), // is active
-//                t.getAs[Long](8) // num friends
-//                ))
-//                .map(t => (t._1.toInt, t._9))
-//
-//            val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
-//            val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
-//            val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
+            }
+            val maxPageRank = pageRank.map(t => t._2).max()
+            val normalizedPageRank = pageRank.map(t => t._1 -> t._2 / maxPageRank)
+            val normalizedPageRankBC = sc.broadcast(normalizedPageRank.collectAsMap())
+
+            otherDetails.printSchema()
+
+            val otherNeighborsCount = otherDetails.map(t => (
+                t.getAs[Long](0), // UID
+                t.getAs[Long](1), // CreateDate
+                t.getAs[Int](2), // BirthDate
+                t.getAs[Int](3), // gender
+                t.getAs[Long](4), // country ID
+                t.getAs[Int](5), // location ID
+                t.getAs[Int](6), // login region
+                t.getAs[Int](7), // is active
+                t.getAs[Long](8) // num friends
+                ))
+                .map(t => (t._1.toInt, t._9.toInt))
 
             val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
-            val neighborsCount = mainNeighborsCount
+            val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
             val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
             /*
@@ -333,7 +329,7 @@ object Baseline {
                 val nCount = neighborsCountBC.value.getOrElse(uf.user, 0)
                 val aaScore = if (nCount >= 2) 1.0 / Math.log(nCount.toDouble) else 0.0
                 val fedorScore = 100.0 / Math.pow(nCount.toDouble + 10, 1.0/3.0) - 6
-                val pageRankScore = 1.0 //normalizedPageRankBC.value.getOrElse(uf.user, 0.0)
+                val pageRankScore = normalizedPageRankBC.value.getOrElse(uf.user, 0.0)
 
                 for (i <- 0 until uf.friends.length) {
                     val p1 = uf.friends(i).uid
