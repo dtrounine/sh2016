@@ -258,7 +258,7 @@ object Baseline {
              useForTraining(uid) || useForPrediction(uid)
         }
 
-        if (true || stage <= STAGE_PAIRS /* && !fs.exists(new Path(commonFriendsPath))*/) {
+        if (stage <= STAGE_PAIRS /* && !fs.exists(new Path(commonFriendsPath))*/) {
 
             val pageRank = {
                 sqlc.read.parquet(userPageRankPath)
@@ -318,9 +318,9 @@ object Baseline {
                          else if (iType == 17) 16.0 // отметка пользователя на отдельном фото
                          else if (iType == 18) 32.0 // отправка подарка
                          else 0.0
-                     sum += importance * interaction._2
+                     sum += Math.log(importance * interaction._2)
                  }
-                 Math.log(sum)
+                 sum
             }
 
             def genPairScores(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
