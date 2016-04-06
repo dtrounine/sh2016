@@ -269,26 +269,30 @@ object Baseline {
 //            val normalizedPageRank = pageRank.map(t => t._1 -> t._2 / maxPageRank)
 //            val normalizedPageRankBC = sc.broadcast(normalizedPageRank.collectAsMap())
 
-            otherDetails.printSchema()
-
-            val otherNeighborsCount = otherDetails.map(t => (
-                t.getAs[Long](0), // UID
-                t.getAs[Long](1), // CreateDate
-                t.getAs[Int](2), // BirthDate
-                t.getAs[Int](3), // gender
-                t.getAs[Long](4), // country ID
-                t.getAs[Int](5), // location ID
-                t.getAs[Int](6), // login region
-                t.getAs[Int](7), // is active
-                t.getAs[Long](8) // num friends
-                ))
-                .map(t => (t._1.toInt, t._9))
+//            otherDetails.printSchema()
+//
+//            val otherNeighborsCount = otherDetails.map(t => (
+//                t.getAs[Long](0), // UID
+//                t.getAs[Long](1), // CreateDate
+//                t.getAs[Int](2), // BirthDate
+//                t.getAs[Int](3), // gender
+//                t.getAs[Long](4), // country ID
+//                t.getAs[Int](5), // location ID
+//                t.getAs[Int](6), // login region
+//                t.getAs[Int](7), // is active
+//                t.getAs[Long](8) // num friends
+//                ))
+//                .map(t => (t._1.toInt, t._9))
+//
+//            val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
+//            val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
+//            val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
             val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
-            val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
+            val neighborsCount = mainNeighborsCount
             val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
-/*
+            /*
             val interactions = {
                 sqlc.read.parquet(interactionsPath)
                     .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => (from, to) -> entries }
@@ -299,7 +303,7 @@ object Baseline {
                  for (interaction <- interactionEntries) {
                      val iType = interaction._1
                      val importance =
-                         if (iType == 1) 1.0 // удаление фида из ленты
+                         if (iType == 1) 0.0 // удаление фида из ленты
                          else if (iType == 2) 1.0 // поход в гости
                          else if (iType == 3) 1.0 // участие в опросе
                          else if (iType == 4) 1.0 // отправка личного сообщения
@@ -314,14 +318,14 @@ object Baseline {
                          else if (iType == 13) 1.0 // отправка сообщения на форуме
                          else if (iType == 14) 1.0 // оценка фото
                          else if (iType == 15) 1.0 // просмотр фото
-                         else if (iType == 16) 1.0 // отметка пользователя на фотографиях
-                         else if (iType == 17) 1.0 // отметка пользователя на отдельном фото
-                         else if (iType == 18) 1.0 // отправка подарка
+                         else if (iType == 16) 10.0 // отметка пользователя на фотографиях
+                         else if (iType == 17) 10.0 // отметка пользователя на отдельном фото
+                         else if (iType == 18) 10.0 // отправка подарка
                          else 0.0
                  }
             }
 */
-            def genAdamAdarScore(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
+            def genPairScores(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
                 // person1, person2 -> common friends, adam adair score, common school, common work
                 val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Double, Double, Double, Int, Int, Int, Int, Int, Int))]
 
@@ -381,7 +385,7 @@ object Baseline {
                     sqlc.read.parquet(reversedGraphPath)
                         .map((a: Row) => (a.getAs[Int](0), a.getAs[Seq[Row]](1).map { case Row(f: Int, m: Int) => FriendMask(f, m) }.toArray))
                         .map(t => UserFriendsMask(t._1, t._2))
-                        .flatMap(t => genAdamAdarScore(t, numPartitionsGraph, k))
+                        .flatMap(t => genPairScores(t, numPartitionsGraph, k))
                         .reduceByKey((val1, val2) => (
                             val1._1 + val2._1,
                             val1._2 + val2._2,
@@ -394,7 +398,8 @@ object Baseline {
                             val1._9 + val2._9,
                             val1._10 | val2._10,
                             val1._11 | val2._11))
-                        .map(t => PairWithScore(t._1._1, t._1._2, t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11))
+                        .map(t => PairWithScore(t._1._1, t._1._2,  // uid1, uid2
+                            t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11))
                         .filter(pair => pair.aaScore > 1.0)
                 }
 
