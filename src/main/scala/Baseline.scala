@@ -258,7 +258,7 @@ object Baseline {
              useForTraining(uid) || useForPrediction(uid)
         }
 
-        if (stage <= STAGE_PAIRS && !fs.exists(new Path(commonFriendsPath))) {
+        if (true || stage <= STAGE_PAIRS /* && !fs.exists(new Path(commonFriendsPath))*/) {
 
             val pageRank = {
                 sqlc.read.parquet(userPageRankPath)
@@ -377,51 +377,53 @@ object Baseline {
                 pairs
             }
             for (k <- 0 until numPartitionsGraph) {
-                val commonFriendPairs = {
-                    sqlc.read.parquet(reversedGraphPath)
-                        .map((a: Row) => (a.getAs[Int](0), a.getAs[Seq[Row]](1).map { case Row(f: Int, m: Int) => FriendMask(f, m) }.toArray))
-                        .map(t => UserFriendsMask(t._1, t._2))
-                        .flatMap(t => genPairScores(t, numPartitionsGraph, k))
-                        .reduceByKey((val1, val2) => (
-                            val1._1 + val2._1,
-                            val1._2 + val2._2,
-                            val1._3 + val2._3,
-                            val1._4 + val2._4,
-                            val1._5 + val2._5,
-                            val1._6 + val2._6,
-                            val1._7 + val2._7,
-                            val1._8 + val2._8,
-                            val1._9 + val2._9,
-                            val1._10 | val2._10,
-                            val1._11 | val2._11))
-                        .map(t => PairWithScore(t._1._1, t._1._2,  // uid1, uid2
-                            t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11))
-                        .filter(pair => pair.aaScore > 1.0)
-                }
+                if (!fs.exists(new Path(commonFriendsPath + "/part_" + k))) {
+                    val commonFriendPairs = {
+                        sqlc.read.parquet(reversedGraphPath)
+                            .map((a: Row) => (a.getAs[Int](0), a.getAs[Seq[Row]](1).map { case Row(f: Int, m: Int) => FriendMask(f, m) }.toArray))
+                            .map(t => UserFriendsMask(t._1, t._2))
+                            .flatMap(t => genPairScores(t, numPartitionsGraph, k))
+                            .reduceByKey((val1, val2) => (
+                                val1._1 + val2._1,
+                                val1._2 + val2._2,
+                                val1._3 + val2._3,
+                                val1._4 + val2._4,
+                                val1._5 + val2._5,
+                                val1._6 + val2._6,
+                                val1._7 + val2._7,
+                                val1._8 + val2._8,
+                                val1._9 + val2._9,
+                                val1._10 | val2._10,
+                                val1._11 | val2._11))
+                            .map(t => PairWithScore(t._1._1, t._1._2, // uid1, uid2
+                                t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11))
+                            .filter(pair => pair.aaScore > 1.0)
+                    }
 
-                commonFriendPairs.repartition(16).toDF.write.parquet(commonFriendsPath + "/part_" + k)
-                // save small part in text form for debugging
-                if (k == 0) {
-                    commonFriendPairs
-                        .filter(pair => pair.person1 % 100 == 0)
-                        .repartition(16)
-                        .map(pair => (
-                            pair.person1,
-                            pair.person2,
-                            pair.commonFriendsCount,
-                            pair.aaScore,
-                            pair.fedorScore,
-                            pair.interactionScore,
-                            pair.pageRankScore,
-                            pair.commonSchool,
-                            pair.commonWork,
-                            pair.commonArmy,
-                            pair.commonUniversity,
-                            pair.maskOr,
-                            pair.maskAnd
+                    commonFriendPairs.repartition(16).toDF.write.parquet(commonFriendsPath + "/part_" + k)
+                    // save small part in text form for debugging
+                    if (k == 0) {
+                        commonFriendPairs
+                            .filter(pair => pair.person1 % 100 == 0)
+                            .repartition(16)
+                            .map(pair => (
+                                pair.person1,
+                                pair.person2,
+                                pair.commonFriendsCount,
+                                pair.aaScore,
+                                pair.fedorScore,
+                                pair.interactionScore,
+                                pair.pageRankScore,
+                                pair.commonSchool,
+                                pair.commonWork,
+                                pair.commonArmy,
+                                pair.commonUniversity,
+                                pair.maskOr,
+                                pair.maskAnd
+                                )
                             )
-                        )
-                        .saveAsTextFile(commonFriendsTextPath + "/part_" + k)
+                            .saveAsTextFile(commonFriendsTextPath + "/part_" + k)
+                    }
                 }
             }
         }
@@ -477,7 +479,7 @@ object Baseline {
                     t.getAs[Double](3), // aaScore
                     t.getAs[Double](4), // fedorScore
                     t.getAs[Double](5), // interactionScore
-                    t.getAs[Int](6), // pageRankScore
+                    t.getAs[Double](6), // pageRankScore
                     t.getAs[Int](7), t.getAs[Int](8), t.getAs[Int](9), t.getAs[Int](10),
                     t.getAs[Int](11), t.getAs[Int](12)))
         }
