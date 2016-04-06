@@ -282,7 +282,7 @@ object Baseline {
                 t.getAs[Int](7), // is active
                 t.getAs[Long](8) // num friends
                 ))
-                .map(t => (t._1.toInt, t._8))
+                .map(t => (t._1.toInt, t._9))
 
             val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
             val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
