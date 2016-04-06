@@ -288,39 +288,41 @@ object Baseline {
             val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
             val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
-            /*
             val interactions = {
                 sqlc.read.parquet(interactionsPath)
                     .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => (from, to) -> entries }
             }
             val interactionsBC = sc.broadcast(interactions.collectAsMap())
 
-            def getInteractionScore(interactionEntries: Seq[(Int, Double)]): Unit = {
+            def getInteractionScore(interactionEntries: Seq[(Int, Double)]): Double = {
+                 var sum = 0.0
                  for (interaction <- interactionEntries) {
                      val iType = interaction._1
                      val importance =
                          if (iType == 1) 0.0 // удаление фида из ленты
                          else if (iType == 2) 1.0 // поход в гости
                          else if (iType == 3) 1.0 // участие в опросе
-                         else if (iType == 4) 1.0 // отправка личного сообщения
-                         else if (iType == 5) 1.0 // удаление личного сообщения
-                         else if (iType == 6) 1.0 // класс объекта
-                         else if (iType == 7) 1.0 // разкласс объекта
-                         else if (iType == 8) 1.0 // комментирование пользовательского поста
-                         else if (iType == 9) 1.0 // комментирования пользовательского фото
-                         else if (iType == 10) 1.0 // комментирование пользовательского видео
-                         else if (iType == 11) 1.0 // комментирование фотоальбома
+                         else if (iType == 4) 8.0 // отправка личного сообщения
+                         else if (iType == 5) 0.0 // удаление личного сообщения
+                         else if (iType == 6) 2.0 // класс объекта
+                         else if (iType == 7) 0.0 // разкласс объекта
+                         else if (iType == 8) 4.0 // комментирование пользовательского поста
+                         else if (iType == 9) 4.0 // комментирования пользовательского фото
+                         else if (iType == 10) 4.0 // комментирование пользовательского видео
+                         else if (iType == 11) 4.0 // комментирование фотоальбома
                          else if (iType == 12) 1.0 // класс к комментарию
                          else if (iType == 13) 1.0 // отправка сообщения на форуме
-                         else if (iType == 14) 1.0 // оценка фото
+                         else if (iType == 14) 8.0 // оценка фото
                          else if (iType == 15) 1.0 // просмотр фото
-                         else if (iType == 16) 10.0 // отметка пользователя на фотографиях
-                         else if (iType == 17) 10.0 // отметка пользователя на отдельном фото
-                         else if (iType == 18) 10.0 // отправка подарка
+                         else if (iType == 16) 16.0 // отметка пользователя на фотографиях
+                         else if (iType == 17) 16.0 // отметка пользователя на отдельном фото
+                         else if (iType == 18) 32.0 // отправка подарка
                          else 0.0
+                     sum += importance * interaction._2
                  }
+                 Math.log(sum)
             }
-*/
+
             def genPairScores(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
                 // person1, person2 -> common friends, adam adair score, common school, common work
                 val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Double, Double, Double, Int, Int, Int, Int, Int, Int))]
@@ -341,8 +343,8 @@ object Baseline {
                         val work1 = if ((mask1 & MASK_WORK) != 0) 1 else 0
                         val univ1 = if ((mask1 & MASK_UNIVERSITY) != 0) 1 else 0
                         val army1 = if ((mask1 & MASK_ARMY) != 0) 1 else 0
-                        val interaction1 = 1.0
-
+                        val interactionEntries1 = interactionsBC.value.getOrElse((p1, uf.user), null)
+                        val interaction1 = if (interactionEntries1 != null) getInteractionScore(interactionEntries1) else 0.0
 
                         for (j <- i + 1 until uf.friends.length) {
                             val p2 = uf.friends(j).uid
@@ -354,7 +356,8 @@ object Baseline {
                                 val work2 = if ((mask2 & MASK_WORK) != 0) 1 else 0
                                 val univ2 = if ((mask2 & MASK_UNIVERSITY) != 0) 1 else 0
                                 val army2 = if ((mask2 & MASK_ARMY) != 0) 1 else 0
-                                val interaction2 = 1.0
+                                val interactionEntries2 = interactionsBC.value.getOrElse((p2, uf.user), null)
+                                val interaction2 = if (interactionEntries2 != null) getInteractionScore(interactionEntries2) else 0.0
 
                                 val interactionScore = interaction1 * interaction2
 
@@ -588,6 +591,7 @@ object Baseline {
                     Math.log(meanAge),
                     jaccard,
                     cosine,
+                    Math.log(1.0 + pair.interactionScore),
                     if (isSameSex) 1.0 else 0.0,
                     cityFactor,
                     pair.commonSchool,
