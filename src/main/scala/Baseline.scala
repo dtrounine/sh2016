@@ -14,6 +14,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.SparkContext._
+import org.apache.spark.graphx._
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -21,10 +22,13 @@ case class PairWithScore(
         person1: Int,
         person2: Int,
         commonFriendsCount: Int,
-        adamAdarScore: Double,
+        aaScore: Double,
+        fedorScore: Double,
+        interactionScore: Double,
         commonSchool: Int,
         commonWork: Int,
-        commonCircle: Int,
+        commonArmy: Int,
+        commonUniversity: Int,
         maskOr: Int,
         maskAnd: Int
 )
@@ -74,6 +78,8 @@ case class RelationCount(count: Array[Int]) {
     }
 }
 
+case class UserPageRank(user: Long, rank: Double)
+
 case class FriendMask(uid: Int, mask: Int)
 
 case class UserFriendsMask(user: Int, friends: Array[FriendMask])
@@ -93,7 +99,7 @@ object Baseline {
         val dataDir = if (args.length >= 1) args(0) else "./"
 
         val STAGE_REVERSE = 1
-        val STAGE_NEIGHBORS = 2
+        val STAGE_PAGE_RANK = 2
         val STAGE_PAIRS = 3
         val STAGE_COUNT_CITIES = 4
         val STAGE_PREPARE = 5
@@ -126,8 +132,8 @@ object Baseline {
                         stage = STAGE_PREPARE
                     } else if ("train".equals(stageName)) {
                         stage = STAGE_TRAIN
-                    } else if ("neighbors".equals(stageName)) {
-                        stage = STAGE_NEIGHBORS
+                    } else if ("pageRank".equals(stageName)) {
+                        stage = STAGE_PAGE_RANK
                     }
 
                 } else if ("--fromPart".equals(args(i)) && i + 1 < args.length) {
@@ -159,21 +165,14 @@ object Baseline {
         val cityPopulationPath = dataDir + "cityPopulation"
         val cityPopulationTxtPath = cityPopulationPath + "_txt"
         val neighborsCountPath = dataDir + "neighborsCount"
-        val neighborsCountTxtPath = neighborsCountPath + "_txt"
-        val relationsTxtPath = dataDir + "relations_txt"
-
-        val checkGraph = false
-        val checkGraphTxtPath = dataDir + "checkGraph_txt"
-        val findMissingEdges = false
-        val missingEdgesTxtPath = dataDir + "missingEdges_txt"
-        val countRelations = false
-        val countFriendStat = true
-        val friendsStatTxtPath = dataDir + "friendsStat_txt"
+        val userPageRankPath = dataDir + "userPageRank"
+        val userPageRankTxtPath = userPageRankPath + "_txt"
+        val otherDetailsPath = dataDir + "otherDetails"
 
         val numPartitions = 200
         val numPartitionsGraph = 107
-//        val numPartitions = 1
-//        val numPartitionsGraph = 1
+        //        val numPartitions = 1
+        //        val numPartitionsGraph = 1
 
         // read graph, flat and reverse it
         // step 1.a from description
@@ -213,147 +212,23 @@ object Baseline {
                 })
         }
 
-        if (countRelations) {
-            val relationCount = graphMask.flatMap(uf => uf.friends.map(friend => {
-                val counts = Array.fill[Int](32)(0)
-                var mask = 1;
-                for (i <- 0 until 32) {
-                    if ((friend.mask & mask) != 0) {
-                        counts(i) = 1
-                    }
-                    mask <<= 1
-                }
-                RelationCount(counts)
-            }))
-            .reduce((rcount1, rcount2) => {
-                for (i <- 0 until Math.min(rcount1.count.length, rcount2.count.length)) {
-                    rcount1.count(i) = rcount1.count(i) + rcount2.count(i)
-                }
-                rcount1
-            })
-            sc.parallelize(Array(relationCount), 1).saveAsTextFile(relationsTxtPath)
-        }
-
-        if (countFriendStat) {
-            val mainUsersBC = sc.broadcast(graph.map(uf => uf.user).collect().toSet)
-            val friendStats = graph.map(uf => {
-                var intCount = 0
-                var extCount = 0
-                for (uid <- uf.friends) {
-                    if (mainUsersBC.value.contains(uid)) {
-                        intCount = intCount + 1
-                    } else {
-                        extCount = extCount + 1
-                    }
-                }
-                FriendStat(intCount, extCount)
-            }).reduce((stat1, stat2) => FriendStat(stat1.intCount + stat2.intCount, stat1.extCount + stat2.extCount))
-
-            sc.parallelize(friendStats, 1).saveAsTextFile(friendsStatTxtPath)
-            return
-        }
-
-        if (checkGraph) {
-            val mainUsersBC = sc.broadcast(graph.map(uf => uf.user).collect().toSet)
-
-            val reversedGraph = graph
-                .flatMap(userFriends => userFriends.friends.map(x => (x, userFriends.user)))
-                .groupByKey(numPartitions)
-                .filter(t => mainUsersBC.value.contains(t._1))
-                .map(t => UserFriends(t._1, t._2.toArray))
-
-            val nBC = sc.broadcast(graph
-                .map(uf => (uf.user, uf.friends.filter(x => mainUsersBC.value.contains(x)).length))
-                .collectAsMap())
-
-            reversedGraph.filter(uf => uf.friends.length != nBC.value.getOrElse(uf.user, 0))
-                .map(uf => (uf.user, uf.friends.toSeq))
-                .repartition(1)
-                .saveAsTextFile(checkGraphTxtPath)
-            return
-        }
-
-
-        if (findMissingEdges) {
-            val coreNodesBC = sc.broadcast(graph.map(node => node.user).collect().toSet)
-            val coreGraph = graph
-                .map(node => (
-                    node.user,
-                    node.friends.filter(x => coreNodesBC.value.contains(x))
-                ))
-            val reversedCoreGraph = coreGraph
-                .flatMap(node => node._2.map(x => (x, node._1)))
-                .groupByKey(numPartitions)
-
-            // (node_id, out_edges, in_edges)
-            val nodesOutAndIn =
-                coreGraph.fullOuterJoin(reversedCoreGraph)
-                    .map(x => (
-                        x._1,
-                        if (x._2._1.isDefined) x._2._1.get.toArray[Int].sorted else Array[Int](),
-                        if (x._2._2.isDefined) x._2._2.get.toArray[Int].sorted else Array[Int]()
-                    ))
-
-            // input arrays must be sorted
-            def arrayDiff(a: Array[Int], b: Array[Int]) = {
-                val onlyInA = ArrayBuffer.empty[Int]
-                val onlyInB = ArrayBuffer.empty[Int]
-
-                var i = 0
-                var j = 0
-                while (i < a.length && j < b.length) {
-                    if (a(i) == b(j)) {
-                        i = i + 1
-                        j = j + 1
-                    } else if (a(i) < b(j)) {
-                        onlyInA.append(a(i))
-                        i = i + 1
-                    } else {
-                        onlyInB.append(b(j))
-                        j = j + 1
-                    }
-                }
-                while (i < a.length) {
-                    onlyInA.append(a(i))
-                    i = i + 1
-                }
-                while (j < b.length) {
-                    onlyInB.append(b(j))
-                    j = j + 1
-                }
-                (onlyInA.toArray, onlyInB.toArray)
-            }
-
-            // (node_id, missing_out, missing_in
-            val missingEdges = nodesOutAndIn
-                    .map(t => {
-                        val diff = arrayDiff(t._2, t._3)
-                        (t._1, diff._2, diff._1)
-                    })
-                    .filter(t => t._2.length > 0 || t._3.length > 0)
-
-            missingEdges.map(t => (t._1, t._2.toVector, t._3.toVector)).repartition(16).saveAsTextFile(missingEdgesTxtPath)
-
-            return
-        }
-
         def getReversedMaskGraph(minEdges: Int, maxEdges: Int, minReversedEdges: Int, maxReversedEdges: Int) = {
             graphMask
                 .filter(userFriends =>
-                        userFriends.friends.length >= minEdges
+                    userFriends.friends.length >= minEdges
                         && userFriends.friends.length <= maxEdges)
                 .flatMap(userFriends => userFriends.friends.map(x => (x.uid, FriendMask(userFriends.user, x.mask))))
                 .groupByKey(numPartitions)
                 .map(t => UserFriendsMask(t._1, t._2.toArray.sortWith((fm1, fm2) => fm1.uid < fm2.uid)))
                 .filter(userFriends =>
-                        userFriends.friends.length >= minReversedEdges
+                    userFriends.friends.length >= minReversedEdges
                         && userFriends.friends.length <= maxReversedEdges)
                 .map(userFriends => (userFriends.user, userFriends.friends.map(fm => (fm.uid, fm.mask))))
         }
 
 
         if (stage <= STAGE_REVERSE) {
-            val reversedGraph = getReversedMaskGraph(1, 2000, 2, 1000)
+            val reversedGraph = getReversedMaskGraph(1, 10000, 2, 10000)
 
             reversedGraph
                 .toDF
@@ -362,65 +237,109 @@ object Baseline {
             reversedGraph.map(t => (t._1, t._2.toVector)).repartition(16).saveAsTextFile(reversedGraphTxtPath)
         }
 
-        if (stage <= STAGE_NEIGHBORS) {
-            val mainUsers = graph.map(userFriends => userFriends.user)
-            val mainUsersBC = sc.broadcast(mainUsers.collect().toSet)
+        val mainUsers = graph.map(userFriends => userFriends.user)
+        val mainUsersBC = sc.broadcast(mainUsers.collect().toSet)
+
+        val otherDetails = sqlc.read.parquet(otherDetailsPath)
+
+
+        if (stage <= STAGE_PAGE_RANK) {
+            def computePageRank(kernelUsers: Broadcast[Set[Int]]) = {
+                val numIterations = 5
+                val edges = {
+                    sc.textFile(graphPath)
+                        .map(line => {
+                            val lineSplit = line.split("\t")
+                            val user = lineSplit(0).toInt
+                            val friends = {
+                                lineSplit(1)
+                                    .replace("{(", "")
+                                    .replace(")}", "")
+                                    .split("\\),\\(")
+                                    .map(t => t.split(",")(0).toInt)
+                            }.filter(f => kernelUsers.value.contains(f))
+                            (user, friends)
+                        }).flatMap(uf => uf._2.map(x => Edge(uf._1: VertexId, x: VertexId, 1)))
+                }
+
+                Graph.fromEdges(edges, 1).staticPageRank(numIterations).vertices
+                    .map(v => UserPageRank(v._1, v._2))
+                    .toDF()
+                    .write.parquet(userPageRankPath)
+            }
+
+            computePageRank(mainUsersBC)
+        }
+
+
+        if (stage <= STAGE_PAIRS) {
+
+            val otherNeighborsCount = otherDetails.map(t => (
+                t.getAs[Int](0), // UID
+                t.getAs[Int](1), // CreateDate
+                t.getAs[Int](2), // BirthDate
+                t.getAs[Int](3), // gender
+                t.getAs[Int](4), // country ID
+                t.getAs[Int](5), // location ID
+                t.getAs[Int](6), // login region
+                t.getAs[Int](7), // is active
+                t.getAs[Int](8) // num friends
+                ))
+                .map(t => (t._1, t._8))
 
             val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
 
-            val reversedGraphRDD = sqlc.read.parquet(reversedGraphPath)
-            reversedGraphRDD.printSchema()
-            val reversedGraph = reversedGraphRDD
-                    .map((a: Row) => (a.getAs[Int](0), a.getAs[Seq[Row]](1).map{case Row(f: Int, m: Int) => FriendMask(f, m)}.toArray))
-                    .map(t => UserFriendsMask(t._1, t._2))
-            //reversedGraph.map(uf => (uf.user, uf.friends.toVector)).repartition(1).saveAsTextFile(reversedGraphTxtPath + "_restored")
-
-            val otherNeighborsCount = reversedGraph
-                .filter(uf => !mainUsersBC.value.contains(uf.user))
-                .map(uf => (uf.user, uf.friends.length))
-
             val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
-            neighborsCount.map(t => t.swap).sortByKey(ascending = false).repartition(16).saveAsTextFile(neighborsCountTxtPath)
-            neighborsCount.toDF.repartition(16).write.parquet(neighborsCountPath)
-         }
-
-        if (stage <= STAGE_PAIRS) {
-            val neighborsCount = sqlc.read.parquet(neighborsCountPath)
-                    .map(t => (t.getAs[Int](0), t.getAs[Int](1)))
 
             val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
             def genAdamAdarScore(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
                 // person1, person2 -> common friends, adam adair score, common school, common work
-                val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Int, Int, Int, Int, Int))]
+                val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Double, Double, Int, Int, Int, Int, Int, Int))]
 
                 // get Adam-Adair score for the common friend
                 val nCount = neighborsCountBC.value.getOrElse(uf.user, 0)
-                val score = if (nCount >= 2) {
-                    1.0 / Math.log(nCount.toDouble)
-                } else {
-                    0.0
-                }
+                val aaScore = if (nCount >= 2) 1.0 / Math.log(nCount.toDouble) else 0.0
+                val fedorScore = 100.0 / Math.pow(nCount.toDouble + 10, 1.0/3.0) - 6
+
                 for (i <- 0 until uf.friends.length) {
                     val p1 = uf.friends(i).uid
-                    val mask1 = uf.friends(i).mask
-                    val school1 = if ((mask1 & MASK_SCHOOL) != 0) 1 else 0
-                    val work1 = if ((mask1 & MASK_WORK) != 0) 1 else 0
-                    val univ1 = if ((mask1 & MASK_UNIVERSITY) != 0) 1 else 0
-                    val army1 = if ((mask1 & MASK_ARMY) != 0) 1 else 0
 
                     if (p1 % numPartitions == k) {
+                        val mask1 = uf.friends(i).mask
+                        val school1 = if ((mask1 & MASK_SCHOOL) != 0) 1 else 0
+                        val work1 = if ((mask1 & MASK_WORK) != 0) 1 else 0
+                        val univ1 = if ((mask1 & MASK_UNIVERSITY) != 0) 1 else 0
+                        val army1 = if ((mask1 & MASK_ARMY) != 0) 1 else 0
+                        val interaction1 = 1.0
+
                         for (j <- i + 1 until uf.friends.length) {
                             val p2 = uf.friends(j).uid
-                            val mask2 = uf.friends(j).mask
-                            val school2 = if ((mask2 & MASK_SCHOOL) != 0) 1 else 0
-                            val work2 = if ((mask2 & MASK_WORK) != 0) 1 else 0
-                            val univ2 = if ((mask2 & MASK_UNIVERSITY) != 0) 1 else 0
-                            val army2 = if ((mask2 & MASK_ARMY) != 0) 1 else 0
 
-                            val commonCircle = if (work1 * work2 + school1 * school2 + univ1 * univ2 + army1 * army2 > 0) 1 else 0
+                            if (p1 >= fromPart && p1 <= toPart
+                                    || p1 % 11 == 7 || p2 % 11 == 7) {
 
-                            pairs.append(((p1, p2), (1, score, school1 * school2, work1 * work2, commonCircle, mask1 | mask2, mask1 & mask2)))
+                                val mask2 = uf.friends(j).mask
+                                val school2 = if ((mask2 & MASK_SCHOOL) != 0) 1 else 0
+                                val work2 = if ((mask2 & MASK_WORK) != 0) 1 else 0
+                                val univ2 = if ((mask2 & MASK_UNIVERSITY) != 0) 1 else 0
+                                val army2 = if ((mask2 & MASK_ARMY) != 0) 1 else 0
+                                val interaction2 = 1.0
+
+                                val interactionScore = interaction1 * interaction2
+
+                                pairs.append(((p1, p2), (
+                                    1,
+                                    aaScore,
+                                    fedorScore,
+                                    interactionScore,
+                                    school1 * school2,
+                                    work1 * work2,
+                                    army1 * army2,
+                                    univ1 * univ2,
+                                    mask1 | mask2,
+                                    mask1 & mask2)))
+                            }
                         }
                     }
                 }
@@ -429,7 +348,7 @@ object Baseline {
             for (k <- 0 until numPartitionsGraph) {
                 val commonFriendPairs = {
                     sqlc.read.parquet(reversedGraphPath)
-                        .map((a: Row) => (a.getAs[Int](0), a.getAs[Seq[Row]](1).map{case Row(f: Int, m: Int) => FriendMask(f, m)}.toArray))
+                        .map((a: Row) => (a.getAs[Int](0), a.getAs[Seq[Row]](1).map { case Row(f: Int, m: Int) => FriendMask(f, m) }.toArray))
                         .map(t => UserFriendsMask(t._1, t._2))
                         .flatMap(t => genAdamAdarScore(t, numPartitionsGraph, k))
                         .reduceByKey((val1, val2) => (
@@ -438,19 +357,39 @@ object Baseline {
                             val1._3 + val2._3,
                             val1._4 + val2._4,
                             val1._5 + val2._5,
-                            val1._6 | val2._6,
-                            val1._7 | val2._7))
-                        .map(t => PairWithScore(t._1._1, t._1._2, t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7))
-                        .filter(pair => pair.adamAdarScore >= 1.0)
+                            val1._6 + val2._6,
+                            val1._7 + val2._7,
+                            val1._8 + val2._8,
+                            val1._9 | val2._9,
+                            val1._10 | val2._10))
+                        .map(t => PairWithScore(t._1._1, t._1._2, t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10))
+                        //.filter(pair => pair.aaScore >= 1.0)
                 }
 
                 commonFriendPairs.repartition(4).toDF.write.parquet(commonFriendsPath + "/part_" + k)
                 if (k == 0) {
                     commonFriendPairs.repartition(1).map(pair =>
-                            (pair.adamAdarScore, (pair.person1, pair.person2, pair.commonFriendsCount, pair.commonSchool, pair.commonWork, pair.commonCircle, pair.maskOr, pair.maskAnd)))
-                        .sortByKey(ascending = false)
-                        .saveAsTextFile(commonFriendsTextPath + "/part_" + k)
+                        (pair.aaScore,
+                            (
+                                pair.person1,
+                                pair.person2,
+                                pair.commonFriendsCount,
+                                pair.aaScore,
+                                pair.fedorScore,
+                                pair.interactionScore,
+                                pair.commonSchool,
+                                pair.commonWork,
+                                pair.commonArmy,
+                                pair.commonUniversity,
+                                pair.maskOr,
+                                pair.maskAnd
+                            )
+                        )
+                    )
+                    .sortByKey(ascending = false)
+                    .saveAsTextFile(commonFriendsTextPath + "/part_" + k)
                 }
+                return;
             }
         }
 
@@ -496,18 +435,25 @@ object Baseline {
 
         val cityPairCountBC = sc.broadcast(cityPairCount.collectAsMap())
 
-        var adamAdairPairs = sc.parallelize(Seq[PairWithScore] ())
+        var adamAdairPairs = sc.parallelize(Seq[PairWithScore]())
+
+        def readPairsData(path: String) = {
+            sqlc
+                .read.parquet(path)
+                .map(t => PairWithScore(
+                    t.getAs[Int](0), t.getAs[Int](1), // uid1, uid2
+                    t.getAs[Int](2), // commonFriends
+                    t.getAs[Double](3), // aaScore
+                    t.getAs[Double](4), // fedorScore
+                    t.getAs[Double](5), // interactionScore
+                    t.getAs[Int](5), t.getAs[Int](6), t.getAs[Int](7), t.getAs[Int](8),
+                    t.getAs[Int](9), t.getAs[Int](10)))
+        }
 
         for (partNo <- fromPart until toPart + 1) {
             // prepare data for training model
             // step 2
-            val pairsPart = {
-                sqlc
-                    .read.parquet(commonFriendsPath + "/part_" + partNo)
-                    .map(t => PairWithScore(t.getAs[Int](0), t.getAs[Int](1),
-                        t.getAs[Int](2), t.getAs[Double](3), t.getAs[Int](4), t.getAs[Int](5),
-                        t.getAs[Int](6), t.getAs[Int](7), t.getAs[Int](8)))
-            }
+            val pairsPart = readPairsData(commonFriendsPath + "/part_" + partNo)
             adamAdairPairs = adamAdairPairs.union(pairsPart)
         }
 
@@ -542,67 +488,71 @@ object Baseline {
 
         // step 5
         def prepareData(
-                           //commonFriendsCounts: RDD[PairWithCommonFriends],
                            adamAdairScores: RDD[PairWithScore],
                            positives: RDD[((Int, Int), Double)],
                            ageSexBC: Broadcast[scala.collection.Map[Int, AgeSexCity]],
                            cityPairCountBS: Broadcast[scala.collection.Map[(Int, Int), Int]]) = {
 
-            //commonFriendsCounts
             adamAdairScores
-                //.map(pair => (pair.person1, pair.person2) -> {
                 .map(pair => (pair.person1, pair.person2) -> {
-                    val ageSexCity1 = ageSexBC.value.getOrElse(pair.person1, AgeSexCity(0, 0, 0))
-                    val ageSexCity2 = ageSexBC.value.getOrElse(pair.person2, AgeSexCity(0, 0, 0))
-                    val isSameSex = ageSexCity1.sex == ageSexCity2.sex
-                    val city1 = ageSexCity1.city
-                    val city2 = ageSexCity2.city
-                    val cityFactor = if (city1 == city2) {
-                        1.0
+                val ageSexCity1 = ageSexBC.value.getOrElse(pair.person1, AgeSexCity(0, 0, 0))
+                val ageSexCity2 = ageSexBC.value.getOrElse(pair.person2, AgeSexCity(0, 0, 0))
+                val isSameSex = ageSexCity1.sex == ageSexCity2.sex
+                val city1 = ageSexCity1.city
+                val city2 = ageSexCity2.city
+                val cityFactor = if (city1 == city2) {
+                    1.0
+                } else {
+                    val cityPair = if (city1 < city2) (city1, city2) else (city2, city1)
+                    val cityCount = cityPairCountBS.value.getOrElse(cityPair, 0)
+                    if (cityCount > 50000) {
+                        0.5
                     } else {
-                        val cityPair = if (city1 < city2) (city1, city2) else (city2, city1)
-                        val cityCount = cityPairCountBS.value.getOrElse(cityPair, 0)
-                        if (cityCount > 50000) {
-                            0.5
-                        } else {
-                            0.0
-                        }
+                        0.0
                     }
-                    val diffAge = abs(ageSexCity1.age - ageSexCity2.age).toDouble
-                    val meanAge = 25000.0 - (ageSexCity1.age + ageSexCity2.age) * 0.5
+                }
+                val diffAge = abs(ageSexCity1.age - ageSexCity2.age).toDouble
+                val meanAge = 25000.0 - (ageSexCity1.age + ageSexCity2.age) * 0.5
 
-                    Vectors.dense(
-                        Math.log(pair.adamAdarScore),
-                        Math.log(diffAge + 1.0),
-                        Math.log(meanAge),
-                        if (isSameSex) 1.0 else 0.0,
-                        cityFactor,
-                        pair.commonSchool,
-                        pair.commonWork,
-                        pair.commonCircle,
-                        if (pair.maskAnd > 1) 1.0 else 0.0
-//                        if (pair.maskOr > 1) 1.0 else 0.0
-                    )
-                })
-                .leftOuterJoin(positives)
+                Vectors.dense(
+                    Math.log(1.0 + pair.aaScore),
+                    Math.log(diffAge + 1.0),
+                    Math.log(meanAge),
+                    if (isSameSex) 1.0 else 0.0,
+                    cityFactor,
+                    pair.commonSchool,
+                    pair.commonWork,
+                    pair.commonArmy,
+                    pair.commonUniversity,
+                    if (pair.maskAnd > 1) 1.0 else 0.0
+                )
+            })
+            .leftOuterJoin(positives)
         }
 
+        val genAllPairs = false
+
         val allPairsFeatures = prepareData(adamAdairPairs, positives, ageSexCityBC, cityPairCountBC)
-        allPairsFeatures.map(pairToFeaturesJoinPositives => {
-            val pair = pairToFeaturesJoinPositives._1
-            val joinedValue = pairToFeaturesJoinPositives._2
-            val features = joinedValue._1
-            val positiveOpt = joinedValue._2
-            val positive = if (positiveOpt.isDefined) 1 else 0
-            val person1 = pair._1
-            val person2 = pair._2
-            val lineBuilder = Array.newBuilder[AnyVal]
-            lineBuilder += person1
-            lineBuilder += person2
-            lineBuilder += positive
-            features.foreachActive((i, value) => { lineBuilder += value })
-            lineBuilder.result().mkString(", ")
-        }).repartition(1).saveAsTextFile(dataDir + "allPairsData_txt")
+
+        if (genAllPairs) {
+            allPairsFeatures.map(pairToFeaturesJoinPositives => {
+                val pair = pairToFeaturesJoinPositives._1
+                val joinedValue = pairToFeaturesJoinPositives._2
+                val features = joinedValue._1
+                val positiveOpt = joinedValue._2
+                val positive = if (positiveOpt.isDefined) 1 else 0
+                val person1 = pair._1
+                val person2 = pair._2
+                val lineBuilder = Array.newBuilder[AnyVal]
+                lineBuilder += person1
+                lineBuilder += person2
+                lineBuilder += positive
+                features.foreachActive((i, value) => {
+                    lineBuilder += value
+                })
+                lineBuilder.result().mkString(", ")
+            }).repartition(1).saveAsTextFile(dataDir + "allPairsData_txt")
+        }
 
 
         val allData = allPairsFeatures.map(t => LabeledPoint(t._2._2.getOrElse(0.0), t._2._1))
@@ -668,14 +618,8 @@ object Baseline {
 
         // compute scores on the test set
         // step 7
-        val testCommonFriendsCounts = {
-            sqlc
-                .read.parquet(commonFriendsPath + "/part_*/")
-                .map(t => PairWithScore(t.getAs[Int](0), t.getAs[Int](1),
-                    t.getAs[Int](2), t.getAs[Double](3), t.getAs[Int](4), t.getAs[Int](5),
-                    t.getAs[Int](6), t.getAs[Int](7), t.getAs[Int](8)))
+        val testCommonFriendsCounts = readPairsData(commonFriendsPath + "/part_*/")
                 .filter(pair => pair.person1 % 11 == 7 || pair.person2 % 11 == 7)
-        }
 
         val testData = {
             prepareData(testCommonFriendsCounts, positives, ageSexCityBC, cityPairCountBC)
