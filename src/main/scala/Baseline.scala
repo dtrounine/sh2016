@@ -77,8 +77,6 @@ object Baseline {
         val STAGE_TRAIN = 6
 
         var stage = 0
-        var fromPart = 33
-        var toPart = 42
 
         def parseArgs(): Unit = {
             for (i <- 1 until args.length) {
@@ -97,16 +95,6 @@ object Baseline {
                     } else if ("pageRank".equals(stageName)) {
                         stage = STAGE_PAGE_RANK
                     }
-
-                } else if ("--fromPart".equals(args(i)) && i + 1 < args.length) {
-                    fromPart = args(i + 1).toInt
-
-                } else if ("--toPart".equals(args(i)) && i + 1 < args.length) {
-                    toPart = args(i + 1).toInt
-
-                } else if ("--part".equals(args(i)) && i + 1 < args.length) {
-                    fromPart = args(i + 1).toInt
-                    toPart = fromPart
                 }
             }
         }
@@ -174,11 +162,6 @@ object Baseline {
                 })
         }
 
-        val interactions = {
-            sqlc.read.parquet(interactionsPath)
-                .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => Interaction(from, to, entries) }
-        }
-
         def getReversedMaskGraph(minEdges: Int, maxEdges: Int, minReversedEdges: Int, maxReversedEdges: Int) = {
             graphMask
                 .filter(userFriends =>
@@ -239,8 +222,7 @@ object Baseline {
         }
 
         def useForTraining(uid: Int): Boolean = {
-            val part = uid % numPartitionsGraph
-            part >= fromPart || part <= toPart
+            uid % 11 == 5 || uid % 11 == 6
         }
 
         def useForPrediction(uid: Int): Boolean = {
@@ -281,12 +263,6 @@ object Baseline {
             val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
             val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
-            val interactions = {
-                sqlc.read.parquet(interactionsPath)
-                    .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => (from, to) -> entries }
-            }
-            val interactionsBC = sc.broadcast(interactions.collectAsMap())
-
             def getInteractionScore(interactionEntries: Seq[(Int, Double)]): Double = {
                  var sum = 0.0
                  for (interaction <- interactionEntries) {
@@ -311,10 +287,16 @@ object Baseline {
                          else if (iType == 17) 16.0 // отметка пользователя на отдельном фото
                          else if (iType == 18) 32.0 // отправка подарка
                          else 0.0
-                     sum += Math.log(importance * interaction._2)
+                     sum += Math.log(1.0 + importance * interaction._2)
                  }
                  sum
             }
+
+            val interactions = {
+                sqlc.read.parquet(interactionsPath)
+                    .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => (from, to) -> getInteractionScore(entries) }
+            }
+            val interactionsBC = sc.broadcast(interactions.collectAsMap())
 
             def genPairScores(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
                 // person1, person2 -> common friends, adam adair score, common school, common work
@@ -338,8 +320,7 @@ object Baseline {
                         val isSchoolmate1 = MaskHelper.isSchoolmate(mask1)
                         val isArmyFellow1 = MaskHelper.isArmyFellow(mask1)
                         val isOther1 = MaskHelper.isOther(mask1)
-                        val interactionEntries1 = interactionsBC.value.getOrElse((p1, uf.user), null)
-                        val interaction1 = if (interactionEntries1 != null) getInteractionScore(interactionEntries1) else 0.0
+                        val interaction1 = interactionsBC.value.getOrElse((p1, uf.user), 0.0)
 
                         for (j <- i + 1 until uf.friends.length) {
                             val p2 = uf.friends(j).uid
@@ -353,8 +334,7 @@ object Baseline {
                                 val isSchoolmate2 = MaskHelper.isSchoolmate(mask2)
                                 val isArmyFellow2 = MaskHelper.isArmyFellow(mask2)
                                 val isOther2 = MaskHelper.isOther(mask2)
-                                val interactionEntries2 = interactionsBC.value.getOrElse((p2, uf.user), null)
-                                val interaction2 = if (interactionEntries2 != null) getInteractionScore(interactionEntries2) else 0.0
+                                val interaction2 = interactionsBC.value.getOrElse((p2, uf.user), 0.0)
 
                                 val interactionScore = interaction1 * interaction2
 
@@ -401,7 +381,13 @@ object Baseline {
                                 val1._13 | val2._13))
                             .map(t => PairWithScore(t._1._1, t._1._2, // uid1, uid2
                                 t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11, t._2._12, t._2._13))
-                            .filter(pair => pair.aaScore > 1.0)
+                            .filter(pair => {
+                                val friends1 = neighborsCountBC.value.getOrElse(pair.person1, 0)
+                                val friends2 = neighborsCountBC.value.getOrElse(pair.person2, 0)
+
+                                friends1 >= 10 && friends2 >= 10 && pair.aaScore > 1.0 ||
+                                    (friends1 < 10 || friends2 < 10) && pair.aaScore > 0.25
+                            })
                     }
 
                     commonFriendPairs.repartition(16).toDF.write.parquet(commonFriendsPath + "/part_" + k)
@@ -489,15 +475,6 @@ object Baseline {
                     t.getAs[Int](7), t.getAs[Int](8), t.getAs[Int](9), t.getAs[Int](10), t.getAs[Int](11), t.getAs[Int](12),
                     t.getAs[Int](13), t.getAs[Int](14)))
         }
-
-//        var adamAdairPairs = sc.parallelize(Seq[PairWithScore]())
-//
-//        for (partNo <- fromPart until toPart + 1) {
-//            // prepare data for training model
-//            // step 2
-//            val pairsPart = readPairsData(commonFriendsPath + "/part_" + partNo)
-//            adamAdairPairs = adamAdairPairs.union(pairsPart)
-//        }
 
         val adamAdairPairs = readPairsData(commonFriendsPath + "/part_*")
                 .filter(pair => useForTraining(pair.person1) || useForTraining(pair.person2))
@@ -713,7 +690,7 @@ object Baseline {
                     val prediction = model.predict(features)
                     Seq(id._1 ->(id._2, prediction), id._2 ->(id._1, prediction))
                 }
-                .filter(t => t._1 % 11 == 7 && t._2._2 >= threshold)
+                .filter(t => useForPrediction(t._1) && t._2._2 >= threshold)
                 .groupByKey(numPartitions)
                 .map(t => {
                     val user = t._1
