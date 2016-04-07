@@ -19,6 +19,8 @@ import org.apache.spark.graphx._
 
 import scala.collection.mutable.ArrayBuffer
 
+
+
 /**
  * Пара пользователей со счетчиком общих друзей и другими счетчиками,
  * которые вычисляются одновременно с ним
@@ -41,19 +43,12 @@ case class PairWithScore(
         maskAnd: Int
 )
 
-case class UserFriends(user: Int, friends: Array[Int])
 
 case class AgeSexCity(age: Int, sex: Int, city: Int)
 
 case class UserPageRank(user: Long, rank: Double)
 
-case class FriendMask(uid: Int, mask: Int)
-
-case class UserFriendsMask(user: Int, friends: Array[FriendMask])
-
 case class FriendStat(intCount: Int, extCount: Int)
-
-case class Interaction(from: Long, to: Long, entries: Seq[(Int, Double)])
 
 object Baseline {
 
@@ -101,142 +96,47 @@ object Baseline {
 
         parseArgs()
 
-        val graphPath = dataDir + "trainGraph"
-        val reversedGraphPath = dataDir + "trainSubReversedGraph"
-        val reversedGraphTxtPath = dataDir + "trainSubReversedGraph_txt"
-        val commonFriendsPath = dataDir + "commonFriendsPartitioned"
-        val commonFriendsTextPath = dataDir + "commonFriendsPartitioned_txt"
-        val demographyPath = dataDir + "demography"
-        val predictionPath = dataDir + "prediction"
-        val trainDataPath = dataDir + "trainData"
-        val modelPath = dataDir + "LogisticRegressionModel"
-        val cityPairCountPath = dataDir + "cityPairCount"
-        val cityPairCountTxtPath = cityPairCountPath + "_txt"
-        val cityPopulationPath = dataDir + "cityPopulation"
-        val cityPopulationTxtPath = cityPopulationPath + "_txt"
-        val userPageRankPath = dataDir + "userPageRank"
-        val userPageRankTxtPath = userPageRankPath + "_txt"
-        val otherDetailsPath = dataDir + "otherDetails"
-        val interactionsPath = dataDir + "interactions"
+        /**
+          *
+          *     READ THE GRAPH, JOIN WITH INTERACTIONS AND REVERSE
+          *
+          */
+        val graph = GraphHelper.readGraph(sc, dataDir)
+        val graphMask = GraphHelper.readGraphWithMasks(sc, dataDir)
 
-        val numPartitions = 200
-        val numPartitionsGraph = 107
-        //        val numPartitions = 1
-        //        val numPartitionsGraph = 1
-
-        // read graph, flat and reverse it
-        // step 1.a from description
-
-        val graph = {
-            sc.textFile(graphPath)
-                .map(line => {
-                    val lineSplit = line.split("\t")
-                    val user = lineSplit(0).toInt
-                    val friends = {
-                        lineSplit(1)
-                            .replace("{(", "")
-                            .replace(")}", "")
-                            .split("\\),\\(")
-                            .map(t => t.split(",")(0).toInt)
-                    }
-                    UserFriends(user, friends)
-                })
+        if (!fs.exists(new Path(Paths.getGraphInteractionPath(dataDir)))) {
+            val interactions = InteractionsHelper.readInteractions(sqlc, dataDir)
+            val graphWithInteractions = InteractionsHelper.joinGraphAndInteraction(graphMask, interactions)
+            graphWithInteractions
+                .toDF
+                .write.parquet(Paths.getGraphInteractionPath(dataDir))
         }
 
-        val graphMask = {
-            sc.textFile(graphPath)
-                .map(line => {
-                    val lineSplit = line.split("\t")
-                    val user = lineSplit(0).toInt
-                    val friends = {
-                        lineSplit(1)
-                            .replace("{(", "")
-                            .replace(")}", "")
-                            .split("\\),\\(")
-                            .map(t => {
-                                val friendSplit = t.split(",")
-                                FriendMask(friendSplit(0).toInt, friendSplit(1).toInt)
-                            })
-                    }
-                    UserFriendsMask(user, friends)
-                })
-        }
+        val graphMaskInteraction = InteractionsHelper.readGraphInteractionFromParquet(sqlc, dataDir)
 
-        def getReversedMaskGraph(minEdges: Int, maxEdges: Int, minReversedEdges: Int, maxReversedEdges: Int) = {
-            graphMask
-                .filter(userFriends =>
-                    userFriends.friends.length >= minEdges
-                        && userFriends.friends.length <= maxEdges)
-                .flatMap(userFriends => userFriends.friends.map(x => (x.uid, FriendMask(userFriends.user, x.mask))))
-                .groupByKey(numPartitions)
-                .map(t => UserFriendsMask(t._1, t._2.toArray.sortWith((fm1, fm2) => fm1.uid < fm2.uid)))
-                .filter(userFriends =>
-                    userFriends.friends.length >= minReversedEdges
-                        && userFriends.friends.length <= maxReversedEdges)
-                .map(userFriends => (userFriends.user, userFriends.friends.map(fm => (fm.uid, fm.mask))))
-        }
-
-
-        if (stage <= STAGE_REVERSE && !fs.exists(new Path(reversedGraphPath))) {
-            val reversedGraph = getReversedMaskGraph(1, 2000, 2, 1000)
+        if (stage <= STAGE_REVERSE && !fs.exists(new Path(Paths.getReversedGraphPath(dataDir)))) {
+            val reversedGraph = GraphHelper.getReversedMaskGraph(graphMaskInteraction, 1, 2000, 2, 1000)
 
             reversedGraph
                 .toDF
-                .write.parquet(reversedGraphPath)
-
-            reversedGraph.map(t => (t._1, t._2.toVector)).repartition(16).saveAsTextFile(reversedGraphTxtPath)
+                .write.parquet(Paths.getReversedGraphPath(dataDir))
         }
+
+        val reversedGraph = GraphHelper.readReversedGraphFromParquet(sqlc, dataDir)
 
         val mainUsers = graph.map(userFriends => userFriends.user)
         val mainUsersBC = sc.broadcast(mainUsers.collect().toSet)
 
-        val otherDetails = sqlc.read.parquet(otherDetailsPath)
+        val otherDetails = sqlc.read.parquet(Paths.getOtherDetailsPath(dataDir))
 
-
-        if (stage <= STAGE_PAGE_RANK && !fs.exists(new Path(userPageRankPath))) {
-            def computePageRank(kernelUsers: Broadcast[Set[Int]]) = {
-                val numIterations = 5
-                val edges = {
-                    sc.textFile(graphPath)
-                        .map(line => {
-                            val lineSplit = line.split("\t")
-                            val user = lineSplit(0).toInt
-                            val friends = {
-                                lineSplit(1)
-                                    .replace("{(", "")
-                                    .replace(")}", "")
-                                    .split("\\),\\(")
-                                    .map(t => t.split(",")(0).toInt)
-                            }.filter(f => kernelUsers.value.contains(f))
-                            (user, friends)
-                        }).flatMap(uf => uf._2.map(x => Edge(uf._1: VertexId, x: VertexId, 1)))
-                }
-
-                Graph.fromEdges(edges, 1).staticPageRank(numIterations).vertices
-                    .map(v => UserPageRank(v._1, v._2))
-                    .toDF()
-                    .write.parquet(userPageRankPath)
-            }
-
-            computePageRank(mainUsersBC)
-        }
-
-        def useForTraining(uid: Int): Boolean = {
-            uid % 11 == 5 || uid % 11 == 6
-        }
-
-        def useForPrediction(uid: Int): Boolean = {
-            uid % 11 == 7
-        }
-
-        def useUser(uid: Int): Boolean = {
-             useForTraining(uid) || useForPrediction(uid)
+        if (stage <= STAGE_PAGE_RANK && !fs.exists(new Path(Paths.getUserPageRankPath(dataDir)))) {
+            PageRankHelper.computePageRank(sc, sqlc, mainUsersBC, dataDir)
         }
 
         if (stage <= STAGE_PAIRS /* && !fs.exists(new Path(commonFriendsPath))*/) {
 
             val pageRank = {
-                sqlc.read.parquet(userPageRankPath)
+                sqlc.read.parquet(Paths.getUserPageRankPath(dataDir))
                     .map{case Row(k: Long, v: Double) => k.toInt -> v}
 
             }
@@ -248,57 +148,22 @@ object Baseline {
 
             val otherNeighborsCount = otherDetails.map(t => (
                 t.getAs[Long](0), // UID
-                t.getAs[Long](1), // CreateDate
-                t.getAs[Int](2), // BirthDate
-                t.getAs[Int](3), // gender
-                t.getAs[Long](4), // country ID
-                t.getAs[Int](5), // location ID
-                t.getAs[Int](6), // login region
-                t.getAs[Int](7), // is active
+//                t.getAs[Long](1), // CreateDate
+//                t.getAs[Int](2), // BirthDate
+//                t.getAs[Int](3), // gender
+//                t.getAs[Long](4), // country ID
+//                t.getAs[Int](5), // location ID
+//                t.getAs[Int](6), // login region
+//                t.getAs[Int](7), // is active
                 t.getAs[Long](8) // num friends
                 ))
-                .map(t => (t._1.toInt, t._9.toInt))
+                .map(t => (t._1.toInt, t._2.toInt))
 
             val mainNeighborsCount = graph.map(userFriends => (userFriends.user, userFriends.friends.length))
             val neighborsCount = mainNeighborsCount.union(otherNeighborsCount)
             val neighborsCountBC = sc.broadcast(neighborsCount.collectAsMap())
 
-            def getInteractionScore(interactionEntries: Seq[(Int, Double)]): Double = {
-                 var sum = 0.0
-                 for (interaction <- interactionEntries) {
-                     val iType = interaction._1
-                     val importance =
-                         if (iType == 1) 0.0 // удаление фида из ленты
-                         else if (iType == 2) 1.0 // поход в гости
-                         else if (iType == 3) 1.0 // участие в опросе
-                         else if (iType == 4) 8.0 // отправка личного сообщения
-                         else if (iType == 5) 0.0 // удаление личного сообщения
-                         else if (iType == 6) 2.0 // класс объекта
-                         else if (iType == 7) 0.0 // разкласс объекта
-                         else if (iType == 8) 4.0 // комментирование пользовательского поста
-                         else if (iType == 9) 4.0 // комментирования пользовательского фото
-                         else if (iType == 10) 4.0 // комментирование пользовательского видео
-                         else if (iType == 11) 4.0 // комментирование фотоальбома
-                         else if (iType == 12) 1.0 // класс к комментарию
-                         else if (iType == 13) 1.0 // отправка сообщения на форуме
-                         else if (iType == 14) 8.0 // оценка фото
-                         else if (iType == 15) 1.0 // просмотр фото
-                         else if (iType == 16) 16.0 // отметка пользователя на фотографиях
-                         else if (iType == 17) 16.0 // отметка пользователя на отдельном фото
-                         else if (iType == 18) 32.0 // отправка подарка
-                         else 0.0
-                     sum += Math.log(1.0 + importance * interaction._2)
-                 }
-                 sum
-            }
-
-            val interactions = {
-                sqlc.read.parquet(interactionsPath)
-                    .map{ case Row(from: Long, to: Long, entries: Seq[(Int, Double)]) => (from, to) -> getInteractionScore(entries) }
-            }
-            val interactionsBC = sc.broadcast(interactions.collectAsMap())
-
-            def genPairScores(uf: UserFriendsMask, numPartitions: Int, k: Int) = {
+            def genPairScores(uf: UserFriendsMaskInteraction, numPartitions: Int, k: Int) = {
                 // person1, person2 -> common friends, adam adair score, common school, common work
                 val pairs = ArrayBuffer.empty[((Int, Int), (Int, Double, Double, Double, Double, Int, Int, Int, Int, Int, Int, Int, Int))]
 
@@ -320,12 +185,12 @@ object Baseline {
                         val isSchoolmate1 = MaskHelper.isSchoolmate(mask1)
                         val isArmyFellow1 = MaskHelper.isArmyFellow(mask1)
                         val isOther1 = MaskHelper.isOther(mask1)
-                        val interaction1 = interactionsBC.value.getOrElse((p1, uf.user), 0.0)
+                        val interaction1 = uf.friends(i).interaction
 
                         for (j <- i + 1 until uf.friends.length) {
                             val p2 = uf.friends(j).uid
 
-                            if (useUser(p1) || useUser(p2)) {
+                            if (Utils.useUser(p1) || Utils.useUser(p2)) {
 
                                 val mask2 = uf.friends(j).mask
                                 val isStrongRelation2 = MaskHelper.isStrongRelation(mask2)
@@ -334,7 +199,7 @@ object Baseline {
                                 val isSchoolmate2 = MaskHelper.isSchoolmate(mask2)
                                 val isArmyFellow2 = MaskHelper.isArmyFellow(mask2)
                                 val isOther2 = MaskHelper.isOther(mask2)
-                                val interaction2 = interactionsBC.value.getOrElse((p2, uf.user), 0.0)
+                                val interaction2 = uf.friends(j).interaction
 
                                 val interactionScore = interaction1 * interaction2
 
@@ -358,13 +223,11 @@ object Baseline {
                 }
                 pairs
             }
-            for (k <- 0 until numPartitionsGraph) {
-                if (!fs.exists(new Path(commonFriendsPath + "/part_" + k))) {
+            for (k <- 0 until Config.numPartitionsGraph) {
+                if (!fs.exists(new Path(Paths.getCommonFriendsPartPath(dataDir, k)))) {
                     val commonFriendPairs = {
-                        sqlc.read.parquet(reversedGraphPath)
-                            .map((a: Row) => (a.getAs[Int](0), a.getAs[Seq[Row]](1).map { case Row(f: Int, m: Int) => FriendMask(f, m) }.toArray))
-                            .map(t => UserFriendsMask(t._1, t._2))
-                            .flatMap(t => genPairScores(t, numPartitionsGraph, k))
+                        reversedGraph
+                            .flatMap(t => genPairScores(t, Config.numPartitionsGraph, k))
                             .reduceByKey((val1, val2) => (
                                 val1._1 + val2._1,
                                 val1._2 + val2._2,
@@ -381,16 +244,10 @@ object Baseline {
                                 val1._13 | val2._13))
                             .map(t => PairWithScore(t._1._1, t._1._2, // uid1, uid2
                                 t._2._1, t._2._2, t._2._3, t._2._4, t._2._5, t._2._6, t._2._7, t._2._8, t._2._9, t._2._10, t._2._11, t._2._12, t._2._13))
-                            .filter(pair => {
-                                val friends1 = neighborsCountBC.value.getOrElse(pair.person1, 0)
-                                val friends2 = neighborsCountBC.value.getOrElse(pair.person2, 0)
-
-                                friends1 >= 10 && friends2 >= 10 && pair.aaScore > 1.0 ||
-                                    (friends1 < 10 || friends2 < 10) && pair.aaScore > 0.25
-                            })
+                            .filter(pair => Utils.filterPair(pair, neighborsCountBC))
                     }
 
-                    commonFriendPairs.repartition(16).toDF.write.parquet(commonFriendsPath + "/part_" + k)
+                    commonFriendPairs.repartition(16).toDF.write.parquet(Paths.getCommonFriendsPartPath(dataDir, k))
                     // save small part in text form for debugging
                     if (k == 0) {
                         commonFriendPairs
@@ -414,49 +271,18 @@ object Baseline {
                                 pair.maskAnd
                                 )
                             )
-                            .saveAsTextFile(commonFriendsTextPath + "/part_" + k)
+                            .saveAsTextFile(Paths.getCommonFriendsPartTextPath(dataDir, k))
                     }
                 }
             }
         }
 
-        if (stage <= STAGE_COUNT_CITIES && !fs.exists(new Path(cityPairCountPath))) {
-            val userCity = {
-                sc.textFile(demographyPath)
-                    .map(line => {
-                        val lineSplit = line.trim().split("\t")
-                        lineSplit(0).toInt -> lineSplit(5).toInt
-                    })
-            }
-
-            val cityPopulation =
-                userCity
-                    .map(t => t._2 -> 1)
-                    .reduceByKey((x, y) => x + y)
-            cityPopulation.map(t => t.swap).sortByKey(ascending = false).saveAsTextFile(cityPopulationTxtPath)
-
-            val cityPopBC = sc.broadcast(cityPopulation.collectAsMap())
-            val userCityBC = sc.broadcast(userCity.collectAsMap())
-
-            val cityPairCount = graph.flatMap(userFriends => userFriends.friends.map(x => (x, userFriends.user)))
-                .map(t => {
-                    val user1 = t._1
-                    val user2 = t._2
-                    val city1 = userCityBC.value.getOrElse(user1, 0)
-                    val city2 = userCityBC.value.getOrElse(user2, 0)
-                    if (city1 < city2) (city1, city2) else (city2, city1)
-                })
-                .filter(t => t._1 > 0 && t._2 > 0)
-                .map(x => x -> 1)
-                .reduceByKey((count1, count2) => count1 + count2)
-                .filter(t => t._2 >= 5)
-
-            cityPairCount.map(t => (t._1._1, t._1._2, t._2)).repartition(24).toDF().write.parquet(cityPairCountPath)
-            cityPairCount.map(t => t.swap).sortByKey(ascending = false).saveAsTextFile(cityPairCountTxtPath)
+        if (stage <= STAGE_COUNT_CITIES && !fs.exists(new Path(Paths.getCityPairCountPath(dataDir)))) {
+            CityHelper.calcCityPairCounts(sc, sqlc, dataDir, graph)
         }
 
         val cityPairCount = {
-            sqlc.read.parquet(cityPairCountPath)
+            sqlc.read.parquet(Paths.getCityPairCountPath(dataDir))
                 .map(t => ((t.getAs[Int](0), t.getAs[Int](1)), t.getAs[Int](2)))
         }
 
@@ -476,8 +302,8 @@ object Baseline {
                     t.getAs[Int](13), t.getAs[Int](14)))
         }
 
-        val adamAdairPairs = readPairsData(commonFriendsPath + "/part_*")
-                .filter(pair => useForTraining(pair.person1) || useForTraining(pair.person2))
+        val adamAdairPairs = readPairsData(Paths.getAllCommonFriendsPartsPathMask(dataDir))
+                .filter(pair => Utils.useForTraining(pair.person1) || Utils.useForTraining(pair.person2))
 
 
         // step 3
@@ -494,7 +320,7 @@ object Baseline {
 
         // step 4
         val ageSexCity = {
-            sc.textFile(demographyPath)
+            sc.textFile(Paths.getDemographyPath(dataDir))
                 .map(line => {
                     val lineSplit = line.trim().split("\t")
                     if (lineSplit(2) == "") {
@@ -638,7 +464,7 @@ object Baseline {
 
         val data = positiveData.union(negativeSampleData).repartition(24)
 
-        data.saveAsTextFile(trainDataPath)
+        data.saveAsTextFile(Paths.getTrainDataPath(dataDir))
 
         // split data into training (10%) and validation (90%)
         // step 6
@@ -654,7 +480,7 @@ object Baseline {
         }
 
         model.clearThreshold()
-        model.save(sc, modelPath)
+        model.save(sc, Paths.getModelPath(dataDir))
 
         val predictionAndLabels = {
             validation.map { case LabeledPoint(label, features) =>
@@ -674,8 +500,8 @@ object Baseline {
 
         // compute scores on the test set
         // step 7
-        val testCommonFriendsCounts = readPairsData(commonFriendsPath + "/part_*")
-                .filter(pair => useForPrediction(pair.person1) || useForPrediction(pair.person2))
+        val testCommonFriendsCounts = readPairsData(Paths.getAllCommonFriendsPartsPathMask(dataDir))
+                .filter(pair => Utils.useForPrediction(pair.person1) || Utils.useForPrediction(pair.person2))
 
         val testData = {
             prepareData(testCommonFriendsCounts, positives, ageSexCityBC, cityPairCountBC)
@@ -690,8 +516,8 @@ object Baseline {
                     val prediction = model.predict(features)
                     Seq(id._1 ->(id._2, prediction), id._2 ->(id._1, prediction))
                 }
-                .filter(t => useForPrediction(t._1) && t._2._2 >= threshold)
-                .groupByKey(numPartitions)
+                .filter(t => Utils.useForPrediction(t._1) && t._2._2 >= threshold)
+                .groupByKey(Config.numPartitions)
                 .map(t => {
                     val user = t._1
                     val friendsWithRatings = t._2
@@ -702,6 +528,6 @@ object Baseline {
                 .map(t => t._1 + "\t" + t._2.mkString("\t"))
         }
 
-        testPrediction.saveAsTextFile(predictionPath, classOf[GzipCodec])
+        testPrediction.saveAsTextFile(Paths.getPredictionPath(dataDir), classOf[GzipCodec])
     }
 }
