@@ -9,6 +9,7 @@ import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SQLContext}
+import org.apache.spark.mllib.feature.{StandardScaler, StandardScalerModel}
 
 /**
   * Created by dmitry.trunin on 07.04.2016.
@@ -194,7 +195,7 @@ object ModelHelper {
       */
     def trainModel(   sc : SparkContext,
                       trainData: RDD[((Int, Int), (Vector, Double))],
-                      dataDir: String) : (classification.LogisticRegressionModel, Double) = {
+                      dataDir: String) : (classification.LogisticRegressionModel, Double, StandardScalerModel) = {
         val allTrainData = trainData.map(t => LabeledPoint(t._2._2, t._2._1))
         val allCount = allTrainData.count()
 
@@ -249,8 +250,11 @@ object ModelHelper {
         val positiveSplits = positiveSample.randomSplit(splitSize, seed)
         val negativeSplits = negativeSample.randomSplit(splitSize, seed)
 
-        val training = positiveSplits(0).union(negativeSplits(0)).cache()
-        val validation = positiveSplits(1).union(negativeSplits(1))
+        val scaler = new StandardScaler(withMean = true, withStd = true).fit(saveData.map(x => x.features))
+        //val training = positiveSplits(0).union(negativeSplits(0)).cache()
+        //val validation = positiveSplits(1).union(negativeSplits(1))
+        val training = positiveSplits(0).union(negativeSplits(0)).map(x => LabeledPoint(x.label, scaler.transform(x.features))).cache()
+        val validation = positiveSplits(1).union(negativeSplits(1)).map(x => LabeledPoint(x.label, scaler.transform(x.features)))
 
         // run training algorithm to build the model
         val model = {
@@ -279,7 +283,7 @@ object ModelHelper {
         println("model ROC = " + rocLogReg.toString)
         sc.parallelize(Array(rocLogReg), 1).saveAsTextFile(dataDir + "modelLog")
 
-        (model, threshold)
+        (model, threshold, scaler)
     }
 
 }

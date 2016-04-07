@@ -353,6 +353,7 @@ object Baseline {
         val modelThreshold = ModelHelper.trainModel(sc, trainFeatures, dataDir)
         val model = modelThreshold._1
         val threshold = modelThreshold._2
+        val scaler = modelThreshold._3
 
         val predictionData = {
             predictionFeatures
@@ -380,7 +381,8 @@ object Baseline {
         val testPrediction = {
             predictionData
                 .map { case (id, LabeledPoint(label, features)) =>
-                    val prediction = model.predict(features)
+                    val prediction = model.predict(scaler.transform(features))
+                    //val prediction = model.predict(features)
                     id._1 -> (id._2, prediction)
                 }
                 .groupByKey(Config.numPartitions)
