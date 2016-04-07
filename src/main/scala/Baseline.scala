@@ -3,19 +3,12 @@
   */
 
 
-import breeze.numerics.abs
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.compress.GzipCodec
-import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.mllib.classification.{LogisticRegressionModel, LogisticRegressionWithLBFGS}
-import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
-import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.mllib.regression.LabeledPoint
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.SparkContext._
-import org.apache.spark.graphx._
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -44,8 +37,6 @@ case class PairWithScore(
 )
 
 
-case class AgeSexCity(age: Int, sex: Int, city: Int)
-
 case class UserPageRank(user: Long, rank: Double)
 
 case class FriendStat(intCount: Int, extCount: Int)
@@ -64,12 +55,13 @@ object Baseline {
 
         val dataDir = if (args.length >= 1) args(0) else "./"
 
-        val STAGE_REVERSE = 1
-        val STAGE_PAGE_RANK = 2
-        val STAGE_PAIRS = 3
-        val STAGE_COUNT_CITIES = 4
-        val STAGE_PREPARE = 5
-        val STAGE_TRAIN = 6
+        val STAGE_INTERACTIONS = 1
+        val STAGE_REVERSE = 2
+        val STAGE_PAGE_RANK = 3
+        val STAGE_PAIRS = 4
+        val STAGE_COUNT_CITIES = 5
+        val STAGE_PREPARE = 6
+        val STAGE_TRAIN = 7
 
         var stage = 0
 
@@ -89,6 +81,8 @@ object Baseline {
                         stage = STAGE_TRAIN
                     } else if ("pageRank".equals(stageName)) {
                         stage = STAGE_PAGE_RANK
+                    } else if ("interactions".equals(stageName)) {
+                        stage = STAGE_INTERACTIONS
                     }
                 }
             }
@@ -104,7 +98,7 @@ object Baseline {
         val graph = GraphHelper.readGraph(sc, dataDir)
         val graphMask = GraphHelper.readGraphWithMasks(sc, dataDir)
 
-        if (true/* || !fs.exists(new Path(Paths.getGraphInteractionPath(dataDir)))*/) {
+        if (stage <= STAGE_INTERACTIONS || !fs.exists(new Path(Paths.getGraphInteractionPath(dataDir)))) {
             val interactions = InteractionsHelper.readInteractions(sqlc, dataDir)
             val graphWithInteractions = InteractionsHelper.joinGraphAndInteraction(graphMask, interactions)
             graphWithInteractions
@@ -114,7 +108,7 @@ object Baseline {
 
         val graphMaskInteraction = InteractionsHelper.readGraphInteractionFromParquet(sqlc, dataDir)
 
-        if (stage <= STAGE_REVERSE/* && !fs.exists(new Path(Paths.getReversedGraphPath(dataDir)))*/) {
+        if (stage <= STAGE_REVERSE && !fs.exists(new Path(Paths.getReversedGraphPath(dataDir)))) {
             val reversedGraph = GraphHelper.getReversedMaskGraph(graphMaskInteraction, 1, 2000, 2, 1000)
 
             reversedGraph
@@ -122,20 +116,18 @@ object Baseline {
                 .write.parquet(Paths.getReversedGraphPath(dataDir))
         }
 
-        return
-
         val reversedGraph = GraphHelper.readReversedGraphFromParquet(sqlc, dataDir)
 
-        val mainUsers = graph.map(userFriends => userFriends.user)
-        val mainUsersBC = sc.broadcast(mainUsers.collect().toSet)
+        val coreUsers = graph.map(userFriends => userFriends.user)
+        val coreUsersBC = sc.broadcast(coreUsers.collect().toSet)
 
         val otherDetails = sqlc.read.parquet(Paths.getOtherDetailsPath(dataDir))
 
         if (stage <= STAGE_PAGE_RANK && !fs.exists(new Path(Paths.getUserPageRankPath(dataDir)))) {
-            PageRankHelper.computePageRank(sc, sqlc, mainUsersBC, dataDir)
+            PageRankHelper.computePageRank(sc, sqlc, coreUsersBC, dataDir)
         }
 
-        if (stage <= STAGE_PAIRS /* && !fs.exists(new Path(commonFriendsPath))*/) {
+        if (stage <= STAGE_PAIRS/* && !fs.exists(new Path(Paths.getCommonFriendsPath(dataDir)))*/) {
 
             val pageRank = {
                 sqlc.read.parquet(Paths.getUserPageRankPath(dataDir))
@@ -304,219 +296,68 @@ object Baseline {
                     t.getAs[Int](13), t.getAs[Int](14)))
         }
 
-        val adamAdairPairs = readPairsData(Paths.getAllCommonFriendsPartsPathMask(dataDir))
-                .filter(pair => Utils.useForTraining(pair.person1) || Utils.useForTraining(pair.person2))
-
-
-        // step 3
-        val usersBC = sc.broadcast(graph.map(userFriends => userFriends.user).collect().toSet)
-
         val positives = {
             graph
                 .flatMap(
                     userFriends => userFriends.friends
-                        .filter(x => (usersBC.value.contains(x) && x > userFriends.user))
+                        .filter(x => coreUsersBC.value.contains(x) && x > userFriends.user)
                         .map(x => (userFriends.user, x) -> 1.0)
                 )
         }
 
-        // step 4
-        val ageSexCity = {
-            sc.textFile(Paths.getDemographyPath(dataDir))
-                .map(line => {
-                    val lineSplit = line.trim().split("\t")
-                    if (lineSplit(2) == "") {
-                        (lineSplit(0).toInt -> AgeSexCity(0, lineSplit(3).toInt, lineSplit(5).toInt))
-                    }
-                    else {
-                        (lineSplit(0).toInt -> AgeSexCity(lineSplit(2).toInt, lineSplit(3).toInt, lineSplit(5).toInt))
-                    }
-                })
-        }
+        val ageSexCity = DemographyHelper.readAgeSexCity(sc, dataDir)
+        val ageSexCityBC = sc.broadcast(ageSexCity.collectAsMap())
 
-        val mainUsersFriendsBC = {
+        val coreUserFriendCountBC = {
             val m = graph.map(userFriends => userFriends.user -> userFriends.friends.length)
             sc.broadcast(m.collectAsMap())
         }
-        val ageSexCityBC = sc.broadcast(ageSexCity.collectAsMap())
 
-        def getJaccardSimilarity(commonFriends: Int, friendsCount1:Int, friendsCount2:Int) : Double = {
-            val union = friendsCount1 + friendsCount2 - commonFriends
+        if (stage <= STAGE_PREPARE && !fs.exists(new Path(Paths.getFeaturesPath(dataDir)))) {
+            val pairs = readPairsData(Paths.getAllCommonFriendsPartsPathMask(dataDir))
+                .filter(pair => Utils.useUser(pair.person1) || Utils.useUser(pair.person2))
 
-            if (union == 0) {
-                0.0
-            } else {
-                commonFriends.toDouble / union.toDouble
-            }
-        }
+            val features = ModelHelper.prepareData(pairs, positives, ageSexCityBC, cityPairCountBC, coreUserFriendCountBC)
 
-        def getCosineSimilarity(commonFriends: Int, friendsCount1:Int, friendsCount2:Int) : Double = {
-            if (friendsCount1 == 0 && friendsCount2 == 0) {
-                0.0
-            } else {
-                commonFriends.toDouble / math.sqrt(friendsCount1 * friendsCount2)
-            }
-        }
-
-        // step 5
-        def prepareData(
-                           adamAdairScores: RDD[PairWithScore],
-                           positives: RDD[((Int, Int), Double)],
-                           ageSexBC: Broadcast[scala.collection.Map[Int, AgeSexCity]],
-                           cityPairCountBS: Broadcast[scala.collection.Map[(Int, Int), Int]]) = {
-
-            adamAdairScores
-                .map(pair => (pair.person1, pair.person2) -> {
-                val ageSexCity1 = ageSexBC.value.getOrElse(pair.person1, AgeSexCity(0, 0, 0))
-                val ageSexCity2 = ageSexBC.value.getOrElse(pair.person2, AgeSexCity(0, 0, 0))
-                val isSameSex = ageSexCity1.sex == ageSexCity2.sex
-                val city1 = ageSexCity1.city
-                val city2 = ageSexCity2.city
-                val cityFactor = if (city1 == city2) {
-                    1.0
-                } else {
-                    val cityPair = if (city1 < city2) (city1, city2) else (city2, city1)
-                    val cityCount = cityPairCountBS.value.getOrElse(cityPair, 0)
-                    if (cityCount > 50000) {
-                        0.5
-                    } else {
-                        0.0
-                    }
-                }
-
-
-                val diffAge = abs(ageSexCity1.age - ageSexCity2.age).toDouble
-                val meanAge = 25000.0 - (ageSexCity1.age + ageSexCity2.age) * 0.5
-                val friendsCount1 = mainUsersFriendsBC.value.getOrElse(pair.person1, 0)
-                val friendsCount2 = mainUsersFriendsBC.value.getOrElse(pair.person2, 0)
-                val jaccard = getJaccardSimilarity(pair.commonFriendsCount, friendsCount1, friendsCount2)
-                val cosine = getCosineSimilarity(pair.commonFriendsCount, friendsCount1, friendsCount2)
-
-                Vectors.dense(
-                    Math.log(1.0 + pair.aaScore),
-                    Math.log(1.0 + pair.fedorScore),
-                    Math.log(diffAge + 1.0),
-                    Math.log(meanAge),
-                    jaccard,
-                    cosine,
-                    Math.log(1.0 + pair.interactionScore),
-                    if (isSameSex) 1.0 else 0.0,
-                    cityFactor,
-                    pair.isStrongRelation,
-                    pair.isWeakRelation,
-                    pair.isColleague,
-                    pair.isSchoolmate,
-                    pair.isArmyFellow,
-                    pair.isOther,
-                    if (pair.maskAnd > 1) 1.0 else 0.0
-                )
-            })
-            .leftOuterJoin(positives)
-        }
-
-        val genAllPairs = false
-
-        val allPairsFeatures = prepareData(adamAdairPairs, positives, ageSexCityBC, cityPairCountBC)
-
-        if (genAllPairs) {
-            allPairsFeatures.map(pairToFeaturesJoinPositives => {
-                val pair = pairToFeaturesJoinPositives._1
-                val joinedValue = pairToFeaturesJoinPositives._2
-                val features = joinedValue._1
-                val positiveOpt = joinedValue._2
-                val positive = if (positiveOpt.isDefined) 1 else 0
-                val person1 = pair._1
-                val person2 = pair._2
-                val lineBuilder = Array.newBuilder[AnyVal]
-                lineBuilder += person1
-                lineBuilder += person2
-                lineBuilder += positive
-                features.foreachActive((i, value) => {
-                    lineBuilder += value
-                })
-                lineBuilder.result().mkString(", ")
-            }).repartition(1).saveAsTextFile(dataDir + "allPairsData_txt")
+            features.repartition(48).toDF.write.parquet(Paths.getFeaturesPath(dataDir))
         }
 
 
-        val allData = allPairsFeatures.map(t => LabeledPoint(t._2._2.getOrElse(0.0), t._2._1))
+        val features = ModelHelper.readFeatures(sqlc, dataDir)
 
-        val positiveData = allData
-            .filter(labeledPoint => labeledPoint.label > 0.9)
-        val negativeData = allData
-            .filter(labeledPoint => labeledPoint.label < 0.1)
-        val allCount = allData.count()
-        val positiveCount = positiveData.count()
-        val negativeCount = negativeData.count()
+        val trainFeatures = features.filter(entry => {
+            val uid1 = entry._1._1
+            val uid2 = entry._1._2
 
-        val positiveFraction = 0.6
-        val requiredNegativeSampleCount = Math.min(negativeCount.toInt,
-                (positiveCount.toDouble * (1.0 / positiveFraction - 1.0)).toInt)
-        val negativeSampleData = sc.parallelize(negativeData.takeSample(
-            withReplacement = false,
-            num = requiredNegativeSampleCount,
-            seed = 155L
-        ))
-        val effectiveNegativeSampleCount = negativeSampleData.count
-        val negativePercent = 100 * effectiveNegativeSampleCount / (effectiveNegativeSampleCount + positiveCount)
+            Utils.useForTraining(uid1) || Utils.useForTraining(uid2)
+        })
 
-        sc.parallelize(Seq[Long](allCount, positiveCount, negativeCount,
-                                 requiredNegativeSampleCount, effectiveNegativeSampleCount, negativePercent), 1)
-                    .saveAsTextFile(dataDir + "trainData_stats")
+        val predictionFeatures = features.filter(entry => {
+            val uid1 = entry._1._1
+            val uid2 = entry._1._2
 
-        val data = positiveData.union(negativeSampleData).repartition(24)
+            Utils.useForPrediction(uid1) || Utils.useForPrediction(uid2)
+        })
 
-        data.saveAsTextFile(Paths.getTrainDataPath(dataDir))
+        val modelThreshold = ModelHelper.trainModel(sc, trainFeatures, dataDir)
+        val model = modelThreshold._1
+        val threshold = modelThreshold._2
 
-        // split data into training (10%) and validation (90%)
-        // step 6
-        val splits = data.randomSplit(Array(0.1, 0.9), seed = 11L)
-        val training = splits(0).cache()
-        val validation = splits(1)
-
-        // run training algorithm to build the model
-        val model = {
-            new LogisticRegressionWithLBFGS()
-                .setNumClasses(2)
-                .run(training)
-        }
-
-        model.clearThreshold()
-        model.save(sc, Paths.getModelPath(dataDir))
-
-        val predictionAndLabels = {
-            validation.map { case LabeledPoint(label, features) =>
-                val prediction = model.predict(features)
-                (prediction, label)
-            }
-        }
-
-        // estimate model quality
-        @transient val metricsLogReg = new BinaryClassificationMetrics(predictionAndLabels, 100)
-        val threshold = metricsLogReg.fMeasureByThreshold(2.0).sortBy(-_._2).take(1)(0)._1
-
-        val rocLogReg = metricsLogReg.areaUnderROC()
-        println("model ROC = " + rocLogReg.toString)
-        sc.parallelize(Array(rocLogReg), 1).saveAsTextFile(dataDir + "modelLog")
-
-
-        // compute scores on the test set
-        // step 7
-        val testCommonFriendsCounts = readPairsData(Paths.getAllCommonFriendsPartsPathMask(dataDir))
-                .filter(pair => Utils.useForPrediction(pair.person1) || Utils.useForPrediction(pair.person2))
-
-        val testData = {
-            prepareData(testCommonFriendsCounts, positives, ageSexCityBC, cityPairCountBC)
-                .map(t => t._1 -> LabeledPoint(t._2._2.getOrElse(0.0), t._2._1))
+        val predictionData = {
+            predictionFeatures
+                .map(t => t._1 -> LabeledPoint(t._2._2, t._2._1))
                 .filter(t => t._2.label == 0.0)
         }
 
         // step 8
         val testPrediction = {
-            testData
+            predictionData
                 .flatMap { case (id, LabeledPoint(label, features)) =>
                     val prediction = model.predict(features)
-                    Seq(id._1 ->(id._2, prediction), id._2 ->(id._1, prediction))
+                    Seq(
+                        id._1 -> (id._2, prediction),
+                        id._2 ->(id._1, prediction)
+                    )
                 }
                 .filter(t => Utils.useForPrediction(t._1) && t._2._2 >= threshold)
                 .groupByKey(Config.numPartitions)

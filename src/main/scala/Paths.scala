@@ -25,4 +25,6 @@ object Paths {
     def getUserPageRankTxtPath(dataDir: String) = getUserPageRankPath(dataDir) + "_txt"
     def getOtherDetailsPath(dataDir: String) = dataDir + "otherDetails"
     def getInteractionsPath(dataDir: String) = dataDir + "interactions"
+
+    def getFeaturesPath(dataDir: String) = dataDir + "features"
 }
