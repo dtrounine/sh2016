@@ -386,6 +386,7 @@ object Baseline {
                         id._2 ->(id._1, prediction)
                     )
                 }
+                .filter(t => Utils.useForPrediction(t._1))
                 .groupByKey(Config.numPartitions)
                 .map(t => {
                     val user = t._1

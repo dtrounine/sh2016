@@ -111,6 +111,24 @@ object ModelHelper {
                        cityPairCountBC: Broadcast[scala.collection.Map[(Int, Int), Int]],
                        coreUserFriendCountBC: Broadcast[scala.collection.Map[Int, Int]]) : RDD[((Int, Int), (Vector, Double))] = {
         pairScores
+            .flatMap(pair => Seq(
+                pair,
+                PairWithScore(
+                    pair.person2, pair.person1,
+                    pair.commonFriendsCount,
+                    pair.aaScore,
+                    pair.fedorScore,
+                    pair.interactionScore,
+                    pair.pageRankScore,
+                    pair.isStrongRelation,
+                    pair.isWeakRelation,
+                    pair.isColleague,
+                    pair.isSchoolmate,
+                    pair.isArmyFellow,
+                    pair.isOther,
+                    pair.maskOr,
+                    pair.maskAnd
+                )))
             .map(pair => {
                 val features = createFeatures(pair, ageSexBC, cityPairCountBC, coreUserFriendCountBC)
                 (pair.person1, pair.person2) -> features
@@ -141,7 +159,6 @@ object ModelHelper {
             val uid2 = f._1._2
             val areFriends = if (f._2._2 > 0.5) 1 else 0
             val features = f._2._1.toArray
-
         })
     }
 
