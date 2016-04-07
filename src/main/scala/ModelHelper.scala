@@ -15,6 +15,9 @@ import org.apache.spark.sql.{Row, SQLContext}
   */
 object ModelHelper {
 
+    val maxTrainSetSize = 100000
+    val positiveFraction = 0.6
+
     def getJaccardSimilarity(commonFriends: Int, friendsCount1:Int, friendsCount2:Int) : Double = {
         val union = friendsCount1 + friendsCount2 - commonFriends
 
@@ -152,46 +155,61 @@ object ModelHelper {
                       trainData: RDD[((Int, Int), (Vector, Double))],
                       dataDir: String) : (classification.LogisticRegressionModel, Double) = {
         val allTrainData = trainData.map(t => LabeledPoint(t._2._2, t._2._1))
+        val allCount = allTrainData.count()
 
         val positiveData = allTrainData
             .filter(labeledPoint => labeledPoint.label > 0.9)
+        val positiveCount = positiveData.count().toInt
+
         val negativeData = allTrainData
             .filter(labeledPoint => labeledPoint.label < 0.1)
-        val allCount = allTrainData.count()
-        val positiveCount = positiveData.count()
         val negativeCount = negativeData.count()
 
-        val positiveFraction = 0.6
-        val requiredNegativeSampleCount = Math.min(negativeCount.toInt,
-            (positiveCount.toDouble * (1.0 / positiveFraction - 1.0)).toInt)
-        val negativeSampleData = sc.parallelize(negativeData.takeSample(
+        val positiveSampleSize = Math.min(positiveCount, (maxTrainSetSize * positiveFraction).toInt)
+        val negativeSampleSize = Math.min(negativeCount.toInt,
+            (positiveSampleSize.toDouble * (1.0 / positiveFraction - 1.0)).toInt)
+
+        val seed = 155L
+
+        val positiveSample = sc.parallelize(positiveData.takeSample(
             withReplacement = false,
-            num = requiredNegativeSampleCount,
-            seed = 155L
+            num = positiveSampleSize,
+            seed
         ))
-        val effectiveNegativeSampleCount = negativeSampleData.count
-        val negativePercent = 100 * effectiveNegativeSampleCount / (effectiveNegativeSampleCount + positiveCount)
+
+        val negativeSample = sc.parallelize(negativeData.takeSample(
+            withReplacement = false,
+            num = negativeSampleSize,
+            seed
+        ))
+
+        val effectivePositiveSampleCount = positiveSample.count
+        val effectiveNegativeSampleCount = negativeSample.count
+        val negativePercent = 100 * effectiveNegativeSampleCount / (effectiveNegativeSampleCount + effectivePositiveSampleCount)
 
         // save counter to text file for debugging
         sc.parallelize(Seq[Long] (
                 allCount,
                 positiveCount,
                 negativeCount,
-                requiredNegativeSampleCount,
+                positiveSampleSize,
+                negativeSampleSize,
+                effectivePositiveSampleCount,
                 effectiveNegativeSampleCount,
                 negativePercent),
             1)
             .saveAsTextFile(dataDir + "trainData_stats")
 
-        val data = positiveData.union(negativeSampleData).repartition(24)
+        val saveData = positiveSample.union(negativeSample).repartition(24)
+        saveData.saveAsTextFile(Paths.getTrainDataPath(dataDir))
 
-        data.saveAsTextFile(Paths.getTrainDataPath(dataDir))
+        // split data into training (30%) and validation (70%)
+        val splitSize = Array(0.3, 0.7)
+        val positiveSplits = positiveSample.randomSplit(splitSize, seed)
+        val negativeSplits = negativeSample.randomSplit(splitSize, seed)
 
-        // split data into training (10%) and validation (90%)
-        // step 6
-        val splits = data.randomSplit(Array(0.1, 0.9), seed = 11L)
-        val training = splits(0).cache()
-        val validation = splits(1)
+        val training = positiveSplits(0).union(negativeSplits(0)).cache()
+        val validation = positiveSplits(1).union(negativeSplits(1))
 
         // run training algorithm to build the model
         val model = {

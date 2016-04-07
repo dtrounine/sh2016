@@ -47,7 +47,7 @@ object InteractionsHelper {
                    case Row(index: Int, value: Double) => (index, value)
                }))
            .map(x => (x._1.toInt, x._2.toInt) -> getInteractionScore(x._3))
-           .repartition(128)
+           .repartition(129)
     }
 
     def joinGraphAndInteraction(graph: RDD[UserFriendsMask],
