@@ -71,14 +71,20 @@ object ModelHelper {
         val cosine = getCosineSimilarity(pair.commonFriendsCount, friendsCount1, friendsCount2)
 
         Vectors.dense(
+            pair.aaScore,
             Math.log(1.0 + pair.aaScore),
-            Math.log(1.0 + pair.fedorScore),
+            pair.fedorScore,
+            Math.log(6.0 + pair.fedorScore),
+            positiveDiffAge,
             Math.log(positiveDiffAge + 1.0),
+            negativeDiffAge,
             Math.log(negativeDiffAge + 1.0),
             signAge,
+            meanAge,
             Math.log(meanAge),
             jaccard,
             cosine,
+            pair.interactionScore,
             Math.log(1.0 + pair.interactionScore),
             if (isSameSex) 1.0 else 0.0,
             cityFactor,
@@ -218,6 +224,7 @@ object ModelHelper {
                 .run(training)
         }
 
+        println("weights = " + model.weights.toArray.mkString(", "))
         model.clearThreshold()
 
         model.save(sc, Paths.getModelPath(dataDir))

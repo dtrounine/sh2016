@@ -349,6 +349,22 @@ object Baseline {
                 .filter(t => t._2.label == 0.0)
         }
 
+        val predictionGraph = graph.filter(userFriends => Utils.useForPrediction(userFriends.user))
+
+        val totalFriendCount = predictionGraph
+            .map(userFriends => userFriends.friends.length)
+            .reduce(_+_)
+
+        val expectedCandidateCount = predictionGraph
+                .map(userFriends => {
+                    val friendCount = userFriends.friends.length
+                    val candidateCount = (4000000.0 * friendCount.toDouble / totalFriendCount.toDouble).toInt
+
+                    userFriends.user -> candidateCount
+                })
+
+        val expCandidateCountBC = sc.broadcast(expectedCandidateCount.collectAsMap())
+
         // step 8
         val testPrediction = {
             predictionData
@@ -363,8 +379,14 @@ object Baseline {
                 .groupByKey(Config.numPartitions)
                 .map(t => {
                     val user = t._1
-                    val friendsWithRatings = t._2
-                    val topBestFriends = friendsWithRatings.toList.sortBy(-_._2).take(70).map(x => x._1)
+                    val friendsWithRatings = t._2.toList.sortBy(-_._2)
+                    val availableCount = friendsWithRatings.length
+                    val expectedCount = expCandidateCountBC.value.getOrElse(user, 1000)
+
+                    var candidateCount = Math.max(25, Math.min(108, expectedCount))
+                    candidateCount = Math.min(availableCount, candidateCount)
+
+                    val topBestFriends = friendsWithRatings.take(candidateCount).map(x => x._1)
                     (user, topBestFriends)
                 })
                 .sortByKey(true, 1)
