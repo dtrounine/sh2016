@@ -340,14 +340,14 @@ object Baseline {
             val uid1 = entry._1._1
             val uid2 = entry._1._2
 
-            Utils.useForTraining(uid1) || Utils.useForTraining(uid2)
+            Utils.useForTraining(uid1)
         })
 
         val predictionFeatures = features.filter(entry => {
             val uid1 = entry._1._1
             val uid2 = entry._1._2
 
-            Utils.useForPrediction(uid1) || Utils.useForPrediction(uid2)
+            Utils.useForPrediction(uid1)
         })
 
         val modelThreshold = ModelHelper.trainModel(sc, trainFeatures, dataDir)
@@ -379,14 +379,10 @@ object Baseline {
         // step 8
         val testPrediction = {
             predictionData
-                .flatMap { case (id, LabeledPoint(label, features)) =>
+                .map { case (id, LabeledPoint(label, features)) =>
                     val prediction = model.predict(features)
-                    Seq(
-                        id._1 -> (id._2, prediction),
-                        id._2 ->(id._1, prediction)
-                    )
+                    id._1 -> (id._2, prediction)
                 }
-                .filter(t => Utils.useForPrediction(t._1))
                 .groupByKey(Config.numPartitions)
                 .map(t => {
                     val user = t._1
