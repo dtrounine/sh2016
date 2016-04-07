@@ -21,7 +21,7 @@ object Utils {
         val friends1 = neighborCountBC.value.getOrElse(pair.person1, 0)
         val friends2 = neighborCountBC.value.getOrElse(pair.person2, 0)
 
-        friends1 >= 10 && friends2 >= 10 && pair.aaScore > 1.0 ||
+        friends1 >= 10 && friends2 >= 10 && pair.aaScore > 0.5 ||
         (friends1 < 10 || friends2 < 10) && pair.aaScore > 0.25
     }
 }

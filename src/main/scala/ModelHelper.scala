@@ -38,6 +38,7 @@ object ModelHelper {
     }
 
     def createFeatures(pair: PairWithScore,
+                       groupScore: Double,
                        ageSexBC: Broadcast[scala.collection.Map[Int, AgeSexCity]],
                        cityPairCountBC: Broadcast[scala.collection.Map[(Int, Int), Int]],
                        coreUserFriendCountBC: Broadcast[scala.collection.Map[Int, Int]]) : Vector = {
@@ -87,6 +88,8 @@ object ModelHelper {
             cosine,
             pair.interactionScore,
             Math.log(1.0 + pair.interactionScore),
+            groupScore,
+            Math.log(1.0 + groupScore),
             if (isSameSex) 1.0 else 0.0,
             cityFactor,
             pair.isStrongRelation,
@@ -106,27 +109,28 @@ object ModelHelper {
       * (UID1, UID2) -> (Vector_of_features, Label)
       */
     def prepareData(
-                       pairScores: RDD[PairWithScore],
+                       pairGroups: RDD[(PairWithScore, Double)],
                        positives: RDD[((Int, Int), Double)],
                        ageSexBC: Broadcast[scala.collection.Map[Int, AgeSexCity]],
                        cityPairCountBC: Broadcast[scala.collection.Map[(Int, Int), Int]],
                        coreUserFriendCountBC: Broadcast[scala.collection.Map[Int, Int]]) : RDD[((Int, Int), (Vector, Double))] = {
-        pairScores
-            .map(pair => (pair.person1, pair.person2) -> pair)
+        pairGroups
+            .map(pair => (pair._1.person1, pair._1.person2) -> pair)
             .leftOuterJoin(positives)
             .map(t => {
-                val pair = t._2._1
+                val pairGroup = t._2._1
                 val areFriends = t._2._2.getOrElse(0.0)
 
-                (pair, areFriends)
+                (pairGroup, areFriends)
             })
             .flatMap(t => {
-                val pair = t._1
+                val pair = t._1._1
+                val groupScore = t._1._2
                 val areFriend = t._2
 
                 Seq(
-                    pair -> areFriend,
-                    PairWithScore(
+                    (pair, groupScore, areFriend),
+                    (PairWithScore(
                         pair.person2, pair.person1,
                         pair.commonFriendsCount,
                         pair.aaScore,
@@ -141,12 +145,13 @@ object ModelHelper {
                         pair.isOther,
                         pair.maskOr,
                         pair.maskAnd
-                    ) -> areFriend)
-                })
+                    ), groupScore, areFriend)
+                )})
             .map(t => {
                 val pair = t._1
+                val groupScore = t._2
                 val areFriend = t._2
-                val features = createFeatures(pair, ageSexBC, cityPairCountBC, coreUserFriendCountBC)
+                val features = createFeatures(pair, groupScore, ageSexBC, cityPairCountBC, coreUserFriendCountBC)
                 (pair.person1, pair.person2) -> (features, areFriend)
             })
     }

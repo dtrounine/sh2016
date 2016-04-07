@@ -7,6 +7,7 @@ import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.compress.GzipCodec
 import org.apache.spark.mllib.classification.{LogisticRegressionModel, LogisticRegressionWithLBFGS}
 import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.{SparkConf, SparkContext}
 
@@ -35,9 +36,6 @@ case class PairWithScore(
         maskOr: Int,
         maskAnd: Int
 )
-
-
-case class UserPageRank(user: Long, rank: Double)
 
 case class FriendStat(intCount: Int, extCount: Int)
 
@@ -112,7 +110,7 @@ object Baseline {
         val graphMaskInteraction = InteractionsHelper.readGraphInteractionFromParquet(sqlc, dataDir)
 
         if (stage <= STAGE_REVERSE && !fs.exists(new Path(Paths.getReversedGraphPath(dataDir)))) {
-            val reversedGraph = GraphHelper.getReversedMaskGraph(graphMaskInteraction, 1, 2000, 2, 1000)
+            val reversedGraph = GraphHelper.getReversedMaskGraph(graphMaskInteraction, 1, 2000, 2, 2000)
 
             reversedGraph
                 .toDF
@@ -297,6 +295,20 @@ object Baseline {
                     t.getAs[Double](6), // pageRankScore
                     t.getAs[Int](7), t.getAs[Int](8), t.getAs[Int](9), t.getAs[Int](10), t.getAs[Int](11), t.getAs[Int](12),
                     t.getAs[Int](13), t.getAs[Int](14)))
+                .repartition(128)
+        }
+
+        var pairGroups : RDD[(PairWithScore, Double)] = null
+
+        if (!fs.exists(new Path(Paths.getPairsWithGroupsPath(dataDir)))) {
+            val pairs = readPairsData(Paths.getAllCommonFriendsPartsPathMask(dataDir))
+                .filter(pair => Utils.useUser(pair.person1) || Utils.useUser(pair.person2))
+            val groups = GroupHelper.readCommonGroups(sc, dataDir)
+            pairGroups = GroupHelper.joinPairsWithGroups(sqlc, pairs, groups, dataDir)
+        }
+
+        if (pairGroups == null) {
+            pairGroups = GroupHelper.readPairWithGroups(sqlc, dataDir)
         }
 
         val positives = {
@@ -317,10 +329,7 @@ object Baseline {
         }
 
         if (stage <= STAGE_PREPARE && !fs.exists(new Path(Paths.getFeaturesPath(dataDir)))) {
-            val pairs = readPairsData(Paths.getAllCommonFriendsPartsPathMask(dataDir))
-                .filter(pair => Utils.useUser(pair.person1) || Utils.useUser(pair.person2))
-
-            val features = ModelHelper.prepareData(pairs, positives, ageSexCityBC, cityPairCountBC, coreUserFriendCountBC)
+            val features = ModelHelper.prepareData(pairGroups, positives, ageSexCityBC, cityPairCountBC, coreUserFriendCountBC)
 
             features.repartition(48).toDF.write.parquet(Paths.getFeaturesPath(dataDir))
         }

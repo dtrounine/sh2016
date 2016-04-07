@@ -3,6 +3,9 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.graphx._
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.SQLContext._
+
+case class UserPageRank(user: Long, rank: Double)
+
 /**
   * Created by dmitry.trunin on 07.04.2016.
   */

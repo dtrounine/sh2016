@@ -27,4 +27,7 @@ object Paths {
     def getInteractionsPath(dataDir: String) = dataDir + "interactions"
 
     def getFeaturesPath(dataDir: String) = dataDir + "features"
+
+    def getCommonGroupsFilename(dataDir: String) = dataDir + "pair_fit.csv"
+    def getPairsWithGroupsPath(dataDir: String) = dataDir + "pairGroups"
 }
