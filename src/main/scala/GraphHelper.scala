@@ -46,6 +46,7 @@ object GraphHelper {
                 }
                 UserFriendsMask(user, friends)
             })
+            .repartition(128)
     }
 
     def getReversedMaskGraph(graphMask: RDD[UserFriendsMaskInteraction],

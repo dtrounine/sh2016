@@ -104,7 +104,7 @@ object Baseline {
         val graph = GraphHelper.readGraph(sc, dataDir)
         val graphMask = GraphHelper.readGraphWithMasks(sc, dataDir)
 
-        if (!fs.exists(new Path(Paths.getGraphInteractionPath(dataDir)))) {
+        if (true/* || !fs.exists(new Path(Paths.getGraphInteractionPath(dataDir)))*/) {
             val interactions = InteractionsHelper.readInteractions(sqlc, dataDir)
             val graphWithInteractions = InteractionsHelper.joinGraphAndInteraction(graphMask, interactions)
             graphWithInteractions
@@ -114,13 +114,15 @@ object Baseline {
 
         val graphMaskInteraction = InteractionsHelper.readGraphInteractionFromParquet(sqlc, dataDir)
 
-        if (stage <= STAGE_REVERSE && !fs.exists(new Path(Paths.getReversedGraphPath(dataDir)))) {
+        if (stage <= STAGE_REVERSE/* && !fs.exists(new Path(Paths.getReversedGraphPath(dataDir)))*/) {
             val reversedGraph = GraphHelper.getReversedMaskGraph(graphMaskInteraction, 1, 2000, 2, 1000)
 
             reversedGraph
                 .toDF
                 .write.parquet(Paths.getReversedGraphPath(dataDir))
         }
+
+        return
 
         val reversedGraph = GraphHelper.readReversedGraphFromParquet(sqlc, dataDir)
 
