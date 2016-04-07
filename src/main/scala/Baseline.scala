@@ -62,6 +62,7 @@ object Baseline {
         val STAGE_COUNT_CITIES = 5
         val STAGE_PREPARE = 6
         val STAGE_TRAIN = 7
+        val STAGE_EXPORT = 8
 
         var stage = 0
 
@@ -83,6 +84,8 @@ object Baseline {
                         stage = STAGE_PAGE_RANK
                     } else if ("interactions".equals(stageName)) {
                         stage = STAGE_INTERACTIONS
+                    } else if ("export".equals(stageName)) {
+                        stage = STAGE_EXPORT
                     }
                 }
             }
@@ -325,6 +328,14 @@ object Baseline {
 
         val features = ModelHelper.readFeatures(sqlc, dataDir)
 
+        if (stage == STAGE_EXPORT) {
+            ModelHelper.exportFeatures(features.filter(
+                    f => Utils.useForPrediction(f._1._1)
+                        || Utils.useForPrediction(f._1._2)
+                ), dataDir + "/export_features")
+            return
+        }
+
         val trainFeatures = features.filter(entry => {
             val uid1 = entry._1._1
             val uid2 = entry._1._2
@@ -375,7 +386,6 @@ object Baseline {
                         id._2 ->(id._1, prediction)
                     )
                 }
-                .filter(t => Utils.useForPrediction(t._1) && t._2._2 >= threshold)
                 .groupByKey(Config.numPartitions)
                 .map(t => {
                     val user = t._1

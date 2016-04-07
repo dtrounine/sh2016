@@ -134,6 +134,17 @@ object ModelHelper {
             )
     }
 
+    def exportFeatures(features: RDD[((Int, Int), (Vector, Double))],
+                       exportPath: String) : Unit = {
+        features.map(f => {
+            val uid1 = f._1._1
+            val uid2 = f._1._2
+            val areFriends = if (f._2._2 > 0.5) 1 else 0
+            val features = f._2._1.toArray
+
+        })
+    }
+
     def savePairFeatureLabelsToText(data: RDD[((Int, Int), (Vector, Double))],
                                     outPath: String,
                                     numPartitions: Int) : Unit = {
@@ -238,7 +249,7 @@ object ModelHelper {
 
         // estimate model quality
         @transient val metricsLogReg = new BinaryClassificationMetrics(predictionAndLabels, 100)
-        val threshold = metricsLogReg.fMeasureByThreshold(2.0).sortBy(-_._2).take(1)(0)._1
+        val threshold = metricsLogReg.recallByThreshold().sortBy(-_._2).take(1)(0)._1
 
         val rocLogReg = metricsLogReg.areaUnderROC()
         println("model ROC = " + rocLogReg.toString)
